@@ -1,3 +1,8 @@
+
+const csv = require("fast-csv");
+const service = require("./users.service");
+const controller = module.exports = {};
+
 // Set permissions for a user (admin only)
 controller.setPermissions = async (req, res) => {
   try {
@@ -22,9 +27,6 @@ controller.setPermissions = async (req, res) => {
     return res.status(500).json({ message: "Internal server error", error });
   }
 };
-const csv = require("fast-csv");
-const service = require("./users.service");
-const controller = module.exports;
 
 controller.me = async (req, res) => {
   try {

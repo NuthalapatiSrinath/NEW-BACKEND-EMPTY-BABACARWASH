@@ -1,12 +1,13 @@
+const router = require("express").Router();
+const controller = require("./users.controller");
+const AuthHelper = require("../auth/auth.helper");
+const CloudUploadHelper = require("../../../cloud/aws/index");
+
 router.post(
   "/set-permissions",
   AuthHelper.authenticate,
   controller.setPermissions
 );
-const router = require("express").Router();
-const controller = require("./users.controller");
-const AuthHelper = require("../auth/auth.helper");
-const CloudUploadHelper = require("../../../cloud/aws/index");
 
 router.get("/", controller.list);
 router.get("/:id", controller.info);

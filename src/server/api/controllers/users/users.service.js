@@ -1,3 +1,8 @@
+
+const UsersModel = require("../../models/users.model");
+const CommonHelper = require("../../../helpers/common.helper");
+const service = module.exports = {};
+
 // Set permissions for a user (admin only)
 service.setPermissions = async (userId, permissions) => {
   return UsersModel.findByIdAndUpdate(
@@ -6,9 +11,6 @@ service.setPermissions = async (userId, permissions) => {
     { new: true }
   ).lean();
 };
-const UsersModel = require("../../models/users.model");
-const CommonHelper = require("../../../helpers/common.helper");
-const service = module.exports;
 
 service.me = async (userInfo) => {
   const findQuery = { _id: userInfo._id };
