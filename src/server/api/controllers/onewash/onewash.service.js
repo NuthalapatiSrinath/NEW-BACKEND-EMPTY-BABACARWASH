@@ -8,187 +8,154 @@ const moment = require("moment");
 const exceljs = require("exceljs");
 const service = module.exports;
 
+// --- UTILS ---
+const isValidId = (id) =>
+  id && typeof id === "string" && id.match(/^[0-9a-fA-F]{24}$/);
+
+// --- LIST ---
 service.list = async (userInfo, query) => {
-  const findWorkerQuery = {
-    isDeleted: false,
-    ...(userInfo.service_type == "mall"
-      ? { malls: { $in: [userInfo.mall] } }
-      : null),
-    ...(userInfo.service_type == "residence"
-      ? {
-          buildings: {
-            $in: (userInfo.buildings || []).filter((b) => b && b.trim()),
-          },
-        }
-      : null),
-  };
+  // 1. Build Base Query
+  const findQuery = { isDeleted: false };
 
-  const workers = await WorkersModel.find(findWorkerQuery);
-  const workerIds = workers.map((e) => e._id.toString());
+  // 2. CRITICAL FIX: Exclude bad data (empty strings) to prevent Populate Crashes
+  // If we don't filter specific workers, we MUST exclude "" to avoid CastError
+  if (!query.worker) {
+    findQuery.worker = { $ne: "" };
+  }
 
-  const paginationData = CommonHelper.paginationData(query);
+  // 3. Worker Filters from User Info (Supervisor/Mall Manager)
+  const findWorkerQuery = { isDeleted: false };
+  let limitToWorkerIds = null;
 
-  // Validate and parse dates
-  let dateFilter = null;
-  if (query.startDate && query.startDate.trim() !== "") {
-    const startDate = new Date(query.startDate);
-
-    // Check if startDate is valid
-    if (!isNaN(startDate.getTime())) {
-      dateFilter = {
-        createdAt: {
-          $gte: startDate,
-        },
-      };
-
-      // Add endDate if provided and valid
-      if (query.endDate && query.endDate.trim() !== "") {
-        const endDate = new Date(query.endDate);
-        if (!isNaN(endDate.getTime())) {
-          dateFilter.createdAt.$lte = endDate;
-        }
-      }
-    } else {
-      console.warn(
-        "⚠️ [ONEWASH] Invalid startDate format, skipping date filter"
-      );
+  if (userInfo.service_type === "mall" && isValidId(userInfo.mall)) {
+    findWorkerQuery.malls = { $in: [userInfo.mall] };
+    const workers = await WorkersModel.find(findWorkerQuery).select("_id");
+    limitToWorkerIds = workers.map((w) => w._id);
+  } else if (
+    userInfo.service_type === "residence" &&
+    Array.isArray(userInfo.buildings)
+  ) {
+    const validBuildings = userInfo.buildings.filter(isValidId);
+    if (validBuildings.length > 0) {
+      findWorkerQuery.buildings = { $in: validBuildings };
+      const workers = await WorkersModel.find(findWorkerQuery).select("_id");
+      limitToWorkerIds = workers.map((w) => w._id);
     }
   }
 
-  const findQuery = {
-    isDeleted: false,
-    ...(query.search
-      ? {
-          $or: [
-            { parking_no: { $regex: query.search, $options: "i" } },
-            { registration_no: { $regex: query.search, $options: "i" } },
-          ],
-        }
-      : null),
-    ...dateFilter,
-    ...(userInfo.role == "supervisor" && userInfo.service_type
-      ? { service_type: userInfo.service_type }
-      : null),
-    ...(userInfo.role == "admin" &&
-    query.service_type &&
-    query.service_type.trim() !== ""
-      ? { service_type: query.service_type }
-      : null),
-    ...(userInfo.role == "admin" && query.mall && query.mall.trim() !== ""
-      ? { mall: query.mall }
-      : null),
-    ...(userInfo.role == "admin" &&
-    query.building &&
-    query.building.trim() !== ""
-      ? { building: query.building }
-      : null),
-    ...(query.worker && query.worker.trim() !== ""
-      ? { worker: query.worker }
-      : { worker: { $in: workerIds } }),
-  };
+  // 4. Date Filter
+  if (query.startDate && query.startDate !== "null") {
+    const start = new Date(query.startDate);
+    if (!isNaN(start.getTime())) {
+      let end = query.endDate
+        ? new Date(query.endDate)
+        : new Date(query.startDate);
+      if (!query.endDate || query.endDate.length <= 10)
+        end.setHours(23, 59, 59, 999);
 
+      if (!isNaN(end.getTime())) {
+        findQuery.createdAt = { $gte: start, $lte: end };
+      }
+    }
+  }
+
+  // 5. Apply Specific Filters
+  if (userInfo.role === "supervisor" && userInfo.service_type) {
+    findQuery.service_type = userInfo.service_type;
+  } else if (userInfo.role === "admin") {
+    if (query.service_type) findQuery.service_type = query.service_type;
+    if (isValidId(query.mall)) findQuery.mall = query.mall;
+    if (isValidId(query.building)) findQuery.building = query.building;
+  }
+
+  // Worker Selection Logic
+  if (isValidId(query.worker)) {
+    findQuery.worker = query.worker;
+  } else if (limitToWorkerIds) {
+    findQuery.worker = { $in: limitToWorkerIds };
+  }
+
+  // 6. Search Logic
   if (query.search) {
-    const workers = await WorkersModel.find(
-      { isDeleted: false, name: { $regex: query.search, $options: "i" } },
+    const searchRegex = { $regex: query.search, $options: "i" };
+
+    // Find workers matching name
+    const matchingWorkers = await WorkersModel.find(
+      { isDeleted: false, name: searchRegex },
       { _id: 1 }
     ).lean();
-    if (workers.length) {
-      findQuery.$or.push({
-        worker: { $in: workers.map((e) => e._id.toString()) },
+
+    const orConditions = [
+      { parking_no: searchRegex },
+      { registration_no: searchRegex },
+    ];
+
+    if (matchingWorkers.length > 0) {
+      orConditions.push({
+        worker: { $in: matchingWorkers.map((e) => e._id) },
       });
     }
+    findQuery.$or = orConditions;
   }
 
+  const paginationData = CommonHelper.paginationData(query);
   const total = await OneWashModel.countDocuments(findQuery);
 
-  // Fetch data without populate first
+  // 7. Fetch Data
   let data = await OneWashModel.find(findQuery)
     .sort({ _id: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
     .lean();
 
-  // Try to populate each reference separately and catch errors
+  // 8. Safe Populate (Wrapped in Try/Catch block is generally good, but the query fix above should prevent the error)
   try {
-    data = await OneWashModel.populate(data, {
-      path: "worker",
-      model: "workers",
-    });
+    data = await OneWashModel.populate(data, [
+      { path: "worker", model: "workers", select: "name" },
+      { path: "mall", model: "malls", select: "name" },
+      { path: "building", model: "buildings", select: "name" },
+    ]);
   } catch (e) {
-    console.warn("⚠️ [ONEWASH] Worker populate failed:", e.message);
+    console.error("List Populate Warning:", e.message);
   }
 
-  try {
-    data = await OneWashModel.populate(data, {
-      path: "mall",
-      model: "malls",
-    });
-  } catch (e) {
-    console.warn("⚠️ [ONEWASH] Mall populate failed:", e.message);
-  }
-
-  try {
-    data = await OneWashModel.populate(data, {
-      path: "building",
-      model: "buildings",
-    });
-  } catch (e) {
-    console.warn("⚠️ [ONEWASH] Building populate failed:", e.message);
-  }
-
+  // 9. Stats
   const totalPayments = await OneWashModel.aggregate([
     { $match: findQuery },
     { $group: { _id: "$payment_mode", amount: { $sum: "$amount" } } },
   ]);
-  const totalAmount = totalPayments.length
-    ? totalPayments.reduce((p, c) => p + c.amount, 0)
-    : 0;
-  const cash = totalPayments.length
-    ? totalPayments.filter((e) => e._id == "cash")
-    : 0;
-  const card = totalPayments.length
-    ? totalPayments.filter((e) => e._id == "card")
-    : 0;
-  const bank = totalPayments.length
-    ? totalPayments.filter((e) => e._id == "bank transfer")
-    : 0;
+
+  const getAmount = (mode) =>
+    totalPayments.find((p) => p._id?.toLowerCase() === mode)?.amount || 0;
+
   const counts = {
     totalJobs: total,
-    totalAmount,
-    cash: cash.length ? cash[0].amount : 0,
-    card: card.length ? card[0].amount : 0,
-    bank: bank.length ? bank[0].amount : 0,
+    totalAmount: totalPayments.reduce((acc, curr) => acc + curr.amount, 0),
+    cash: getAmount("cash"),
+    card: getAmount("card"),
+    bank: getAmount("bank transfer"),
   };
 
   return { total, data, counts };
 };
 
+// --- INFO ---
 service.info = async (userInfo, id) => {
   return OneWashModel.findOne({ _id: id, isDeleted: false }).lean();
 };
 
+// --- CREATE ---
 service.create = async (userInfo, payload) => {
-  // Validate required fields
-  if (!payload.service_type) {
-    throw new Error("Service type is required");
-  }
-  if (!payload.worker) {
-    throw new Error("Worker is required");
-  }
-  if (!payload.amount || payload.amount <= 0) {
-    throw new Error("Amount must be greater than 0");
-  }
-  if (!payload.registration_no) {
-    throw new Error("Registration number is required");
-  }
+  if (!payload.service_type) throw new Error("Service type is required");
+  if (!payload.worker) throw new Error("Worker is required");
+  if (!payload.amount || payload.amount <= 0)
+    throw new Error("Amount must be > 0");
+  if (!payload.registration_no) throw new Error("Reg No is required");
 
-  // Validate service_type specific fields
-  if (payload.service_type === "mall" && !payload.mall) {
-    throw new Error("Mall is required for mall service");
-  }
-  if (payload.service_type === "residence" && !payload.building) {
-    throw new Error("Building is required for residence service");
-  }
+  if (payload.service_type === "mall" && !payload.mall)
+    throw new Error("Mall required");
+  if (payload.service_type === "residence" && !payload.building)
+    throw new Error("Building required");
 
   const id = await CounterService.id("onewash");
   const data = {
@@ -198,109 +165,70 @@ service.create = async (userInfo, payload) => {
     ...payload,
   };
   const saved = await new OneWashModel(data).save();
-
-  // Return the created document with populated fields
   let created = await OneWashModel.findById(saved._id).lean();
 
-  // Populate worker
   try {
-    created = await OneWashModel.populate(created, {
-      path: "worker",
-      model: "workers",
-    });
-  } catch (e) {
-    console.warn("⚠️ [ONEWASH CREATE] Worker populate failed:", e.message);
-  }
-
-  // Populate mall if exists
-  if (created.mall) {
-    try {
-      created = await OneWashModel.populate(created, {
-        path: "mall",
-        model: "malls",
-      });
-    } catch (e) {
-      console.warn("⚠️ [ONEWASH CREATE] Mall populate failed:", e.message);
-    }
-  }
-
-  // Populate building if exists
-  if (created.building) {
-    try {
-      created = await OneWashModel.populate(created, {
-        path: "building",
-        model: "buildings",
-      });
-    } catch (e) {
-      console.warn("⚠️ [ONEWASH CREATE] Building populate failed:", e.message);
-    }
-  }
+    created = await OneWashModel.populate(created, [
+      { path: "worker", model: "workers" },
+      { path: "mall", model: "malls" },
+      { path: "building", model: "buildings" },
+    ]);
+  } catch (e) {}
 
   return created;
 };
 
+// --- UPDATE ---
 service.update = async (userInfo, id, payload) => {
-  // If only updating settled status, do simple update
   if (payload.settled && !payload.amount && !payload.payment_mode) {
     await OneWashModel.updateOne(
       { _id: id },
       {
-        $set: {
-          settled: payload.settled,
-          settledDate: payload.settledDate,
-        },
+        $set: { settled: payload.settled, settledDate: payload.settledDate },
       }
     );
     return;
   }
 
-  // Otherwise, do full payment update logic
   const onewashData = await OneWashModel.findOne({ _id: id }).lean();
-
-  let amount_paid = 0;
+  let amount_paid = payload.amount;
   let tip_amount = 0;
 
   if (onewashData.mall) {
-    mallData = await MallsModel.findOne({ _id: onewashData.mall });
-    amount_paid = payload.amount;
-    if (payload.payment_mode != "cash") {
-      let finalAmount = mallData.amount + mallData.card_charges;
-      if (payload.amount < finalAmount) {
-        throw "The amount entered is less than the required amount";
-      }
+    const mallData = await MallsModel.findOne({ _id: onewashData.mall });
+    if (payload.payment_mode != "cash" && mallData) {
+      const finalAmount = mallData.amount + mallData.card_charges;
+      if (payload.amount < finalAmount)
+        throw "Amount entered is less than required";
       tip_amount =
         payload.amount > finalAmount ? payload.amount - finalAmount : 0;
     }
   }
 
   if (onewashData.building) {
-    buildingData = await BuildingsModel.findOne({ _id: onewashData.building });
-    amount_paid = payload.amount;
-    if (payload.payment_mode != "cash") {
-      let finalAmount = buildingData.amount + buildingData.card_charges;
-      if (payload.amount < finalAmount) {
-        throw "The amount entered is less than the required amount";
-      }
+    const buildingData = await BuildingsModel.findOne({
+      _id: onewashData.building,
+    });
+    if (payload.payment_mode != "cash" && buildingData) {
+      const finalAmount = buildingData.amount + buildingData.card_charges;
+      if (payload.amount < finalAmount)
+        throw "Amount entered is less than required";
       tip_amount =
         payload.amount > finalAmount ? payload.amount - finalAmount : 0;
     }
   }
 
-  await PaymentsModel.updateOne(
-    { job: id },
-    {
-      $set: {
-        amount_paid,
-        status: payload.status,
-        payment_mode: payload.payment_mode,
-        vehicle: {
-          parking_no: payload.parking_no,
-          registration_no: payload.registration_no,
-        },
-      },
-    }
-  );
+  const updateSet = {
+    amount_paid,
+    status: payload.status,
+    payment_mode: payload.payment_mode,
+    vehicle: {
+      parking_no: payload.parking_no,
+      registration_no: payload.registration_no,
+    },
+  };
 
+  await PaymentsModel.updateOne({ job: id }, { $set: updateSet });
   await OneWashModel.updateOne(
     { _id: id },
     {
@@ -316,6 +244,7 @@ service.update = async (userInfo, id, payload) => {
   );
 };
 
+// --- DELETE ---
 service.delete = async (userInfo, id, payload) => {
   await PaymentsModel.updateOne(
     { job: id },
@@ -334,152 +263,130 @@ service.undoDelete = async (userInfo, id) => {
   );
 };
 
+// --- EXPORT DATA (FIXED) ---
 service.exportData = async (userInfo, query) => {
-  const findQuery = {
-    isDeleted: false,
-    ...(query.search
-      ? {
-          $or: [
-            { parking_no: { $regex: query.search, $options: "i" } },
-            { registration_no: { $regex: query.search, $options: "i" } },
-          ],
-        }
-      : null),
-    ...(query.startDate
-      ? {
-          createdAt: {
-            $gte: new Date(query.startDate),
-            $lte: new Date(query.endDate),
-          },
-        }
-      : null),
-    ...(userInfo.role == "supervisor" && userInfo.service_type
-      ? { service_type: userInfo.service_type }
-      : null),
-    ...(userInfo.role == "admin" && query.service_type
-      ? { service_type: query.service_type }
-      : null),
-    ...(userInfo.role == "admin" && query.mall ? { mall: query.mall } : null),
-    ...(userInfo.role == "admin" && query.building
-      ? { building: query.building }
-      : null),
-    ...(query.worker ? { worker: query.worker } : null),
-  };
+  console.log("🚀 [EXPORT START] Raw:", query);
 
+  // 1. Base Query
+  const findQuery = { isDeleted: false };
+
+  // 2. CRITICAL FIX: Exclude invalid IDs that crash populate
+  // This explicitly ignores records where worker/mall is empty string ""
+  findQuery.worker = { $ne: "" };
+  findQuery.mall = { $ne: "" };
+  findQuery.building = { $ne: "" };
+
+  // 3. Apply Filters
+  if (userInfo.role === "supervisor" && userInfo.service_type) {
+    findQuery.service_type = userInfo.service_type;
+  } else if (userInfo.role === "admin") {
+    if (query.service_type) findQuery.service_type = query.service_type;
+    if (isValidId(query.mall)) findQuery.mall = query.mall;
+    if (isValidId(query.building)) findQuery.building = query.building;
+  }
+
+  if (isValidId(query.worker)) {
+    findQuery.worker = query.worker;
+  }
+
+  // 4. Date Filter
+  if (query.startDate && query.startDate !== "null") {
+    const start = new Date(query.startDate);
+    if (!isNaN(start.getTime())) {
+      let end = query.endDate
+        ? new Date(query.endDate)
+        : new Date(query.startDate);
+      if (!query.endDate || query.endDate.length <= 10)
+        end.setHours(23, 59, 59, 999);
+
+      if (!isNaN(end.getTime())) {
+        findQuery.createdAt = { $gte: start, $lte: end };
+      }
+    }
+  }
+
+  // 5. Search Logic
   if (query.search) {
-    const workers = await WorkersModel.find(
-      { isDeleted: false, name: { $regex: query.search, $options: "i" } },
+    const searchRegex = { $regex: query.search, $options: "i" };
+    const matchedWorkers = await WorkersModel.find(
+      { isDeleted: false, name: searchRegex },
       { _id: 1 }
     ).lean();
-    if (workers.length) {
+
+    findQuery.$or = [
+      { parking_no: searchRegex },
+      { registration_no: searchRegex },
+      { payment_mode: searchRegex },
+      { status: searchRegex },
+    ];
+
+    if (matchedWorkers.length > 0) {
       findQuery.$or.push({
-        worker: { $in: workers.map((e) => e._id.toString()) },
+        worker: { $in: matchedWorkers.map((e) => e._id) },
       });
     }
   }
 
-  const data = await OneWashModel.find(findQuery, {
-    _id: 0,
-    status: 0,
-    isDeleted: 0,
-    createdBy: 0,
-    updatedBy: 0,
-    id: 0,
-    updatedAt: 0,
-  })
+  console.log("🔍 [EXPORT DB QUERY]:", JSON.stringify(findQuery));
+
+  // 6. Fetch Data
+  const data = await OneWashModel.find(findQuery)
     .populate([
-      { path: "worker", model: "workers" },
-      { path: "mall", model: "malls" },
-      { path: "building", model: "buildings" },
+      { path: "worker", model: "workers", select: "name" },
+      { path: "mall", model: "malls", select: "name" },
+      { path: "building", model: "buildings", select: "name" },
     ])
+    .sort({ createdAt: -1 })
     .lean();
 
+  console.log(`✅ [EXPORT] Found ${data.length} records to export.`);
+
+  // 7. Generate Excel
   const workbook = new exceljs.Workbook();
+  const worksheet = workbook.addWorksheet("One Wash Report");
 
-  const reportSheet = workbook.addWorksheet("Report");
-  const worksheet = workbook.addWorksheet("Detailed Report");
+  worksheet.columns = [
+    { header: "ID", key: "id", width: 10 },
+    { header: "Date", key: "date", width: 15 },
+    { header: "Time", key: "time", width: 15 },
+    { header: "Vehicle No", key: "registration_no", width: 20 },
+    { header: "Parking No", key: "parking_no", width: 15 },
+    { header: "Amount (AED)", key: "amount", width: 15 },
+    { header: "Tip (AED)", key: "tip_amount", width: 10 },
+    { header: "Payment Mode", key: "payment_mode", width: 15 },
+    { header: "Status", key: "status", width: 15 },
+    { header: "Location Type", key: "service_type", width: 15 },
+    { header: "Mall/Building Name", key: "location_name", width: 30 },
+    { header: "Worker Name", key: "worker_name", width: 25 },
+  ];
 
-  const keys = Object.keys(data[0]);
+  worksheet.getRow(1).font = { bold: true };
 
-  if (data[0].service_type == "mall") {
-    let index = keys.indexOf("mall");
-    keys.splice(index, 0, "building");
-  }
-
-  worksheet.addRow(keys);
-
-  let mallWiseMap = {};
-  let buildingWiseMap = {};
-
-  for (const iterator of data) {
-    iterator.createdAt = moment(iterator.createdAt).format("YYYY-MM-DD");
-    iterator.worker = iterator.worker.name;
-    iterator.mall = iterator?.mall?.name || "";
-    iterator.building = iterator?.building?.name || "";
-
-    const values = [];
-
-    for (const key of keys) {
-      values.push(iterator[key] !== undefined ? iterator[key] : "");
-    }
-
-    worksheet.addRow(values);
-
-    const key = `${iterator.createdAt}-${iterator.service_type}-${
-      iterator.service_type == "mall" ? iterator.mall : iterator.building
-    }`;
-
-    if (iterator.service_type == "mall") {
-      if (mallWiseMap[key]) {
-        mallWiseMap[key].count++;
-      } else {
-        mallWiseMap[key] = {
-          mall: iterator.mall,
-          createdAt: iterator.createdAt,
-          count: 1,
-        };
-      }
-    } else {
-      if (buildingWiseMap[key]) {
-        buildingWiseMap[key].count++;
-      } else {
-        buildingWiseMap[key] = {
-          building: iterator.building,
-          createdAt: iterator.createdAt,
-          count: 1,
-        };
-      }
-    }
-  }
-
-  reportSheet.addRow(["Day", "Mall", "Count"]);
-
-  for (const key in mallWiseMap) {
-    let values = [
-      mallWiseMap[key].createdAt,
-      mallWiseMap[key].mall,
-      mallWiseMap[key].count,
-    ];
-    reportSheet.addRow(values);
-  }
-
-  reportSheet.addRow([]);
-  reportSheet.addRow([]);
-
-  reportSheet.addRow(["Day", "Building", "Count"]);
-
-  for (const key in buildingWiseMap) {
-    let values = [
-      buildingWiseMap[key].createdAt,
-      buildingWiseMap[key].building,
-      buildingWiseMap[key].count,
-    ];
-    reportSheet.addRow(values);
-  }
+  data.forEach((item) => {
+    const dateObj = new Date(item.createdAt);
+    worksheet.addRow({
+      id: item.id,
+      date: moment(dateObj).format("YYYY-MM-DD"),
+      time: moment(dateObj).format("hh:mm A"),
+      registration_no: item.registration_no,
+      parking_no: item.parking_no || "-",
+      amount: item.amount,
+      tip_amount: item.tip_amount || 0,
+      payment_mode: item.payment_mode || "-",
+      status: item.status || "pending",
+      service_type: item.service_type || "-",
+      location_name:
+        item.service_type === "mall"
+          ? item.mall?.name
+          : item.building?.name || "-",
+      worker_name: item.worker?.name || "Unassigned",
+    });
+  });
 
   return workbook;
 };
 
+// --- MONTHLY ---
 service.monthlyStatement = async (userInfo, query) => {
   const findQuery = {
     isDeleted: false,
@@ -489,15 +396,7 @@ service.monthlyStatement = async (userInfo, query) => {
     },
   };
 
-  const data = await OneWashModel.find(findQuery, {
-    _id: 0,
-    status: 0,
-    isDeleted: 0,
-    createdBy: 0,
-    updatedBy: 0,
-    id: 0,
-    updatedAt: 0,
-  })
+  const data = await OneWashModel.find(findQuery)
     .sort({ _id: -1 })
     .populate([
       { path: "worker", model: "workers" },
@@ -507,7 +406,6 @@ service.monthlyStatement = async (userInfo, query) => {
     .lean();
 
   const workbook = new exceljs.Workbook();
-
   const reportSheet = workbook.addWorksheet("Report");
 
   const days = [
@@ -521,46 +419,43 @@ service.monthlyStatement = async (userInfo, query) => {
   reportSheet.addRow(keys);
 
   const workerMap = {};
-
   for (const iterator of JSON.parse(JSON.stringify(data))) {
-    if (workerMap[iterator.worker._id]) {
-      workerMap[iterator.worker._id].push(iterator);
-    } else {
-      workerMap[iterator.worker._id] = [iterator];
+    if (iterator.worker) {
+      const wid = iterator.worker._id || "unknown";
+      if (workerMap[wid]) workerMap[wid].push(iterator);
+      else workerMap[wid] = [iterator];
     }
   }
 
   let count = 1;
-
   for (const worker in workerMap) {
     let workerData = workerMap[worker];
-    let daywiseMap = {};
     let daywiseCounts = {};
     let tipAmount = 0;
     let totalCars = 0;
 
     for (const iterator of workerData) {
       let date = moment(iterator.createdAt).date();
-      if (daywiseMap[date]) {
-        daywiseMap[date].push(iterator);
-      } else {
-        daywiseMap[date] = [iterator];
-      }
+      daywiseCounts[date] = (daywiseCounts[date] || 0) + 1;
     }
 
     for (const day of days) {
-      let data = daywiseMap[day] || [];
-      daywiseCounts[day] = data.length;
-      for (const wash of data) {
-        tipAmount += Number(wash.tip_amount) || 0;
-      }
-      totalCars += data.length;
+      let count = daywiseCounts[day] || 0;
+      totalCars += count;
     }
+
+    // Recalculate tips correctly
+    tipAmount = workerData.reduce(
+      (acc, curr) => acc + (Number(curr.tip_amount) || 0),
+      0
+    );
+
+    const dayValues = days.map((d) => daywiseCounts[d] || "");
 
     reportSheet.addRow([
       count++,
-      workerData[0].worker.name.trim(),
-      ...Object.values(daywiseCounts),
+      workerData[0].worker?.name?.trim() || "Unknown",
+      ...dayValues,
       totalCars,
       tipAmount,
     ]);

@@ -437,78 +437,180 @@ service.settlePayment = async (userInfo, id, payload) => {
 service.exportData = async (userInfo, query) => {
   const findQuery = {
     isDeleted: false,
-    ...(query.startDate
-      ? {
-          createdAt: {
-            $gte: new Date(query.startDate),
-            $lte: new Date(query.endDate),
-          },
-        }
-      : null),
-    onewash: query.onewash == "true",
+    // Ensure we filter for onewash payments if that's the intent
+    onewash: query.onewash === "true",
     ...(query.status ? { status: query.status } : null),
-    ...(query.worker ? { worker: query.worker } : null),
-    ...(query.building ? { building: query.building } : null),
-    ...(query.mall ? { mall: query.mall } : null),
-    ...(query.search
-      ? {
-          $or: [
-            { "vehicle.registration_no": query.search },
-            { "vehicle.parking_no": query.search },
-          ],
-        }
+    ...(query.worker && query.worker.trim() !== ""
+      ? { worker: query.worker }
       : null),
+    ...(query.building && query.building.trim() !== ""
+      ? { building: query.building }
+      : null),
+    ...(query.mall && query.mall.trim() !== "" ? { mall: query.mall } : null),
   };
 
-  const data = await PaymentsModel.find(findQuery, {
-    _id: 0,
-    isDeleted: 0,
-    createdBy: 0,
-    updatedBy: 0,
-    id: 0,
-    updatedAt: 0,
-    onewash: 0,
-    amount_paid: 0,
-    job: 0,
-    location: 0,
-  })
+  // Date Filter Logic (Robust)
+  if (query.startDate && query.startDate !== "null") {
+    const start = new Date(query.startDate);
+    if (!isNaN(start.getTime())) {
+      let end = query.endDate
+        ? new Date(query.endDate)
+        : new Date(query.startDate);
+      // If date string is short (YYYY-MM-DD), set to end of day
+      if (!query.endDate || query.endDate.length <= 10) {
+        end.setHours(23, 59, 59, 999);
+      }
+
+      if (!isNaN(end.getTime())) {
+        findQuery.createdAt = { $gte: start, $lte: end };
+      }
+    }
+  }
+
+  // Search Logic
+  if (query.search) {
+    findQuery.$or = [
+      { "vehicle.registration_no": { $regex: query.search, $options: "i" } },
+      { "vehicle.parking_no": { $regex: query.search, $options: "i" } },
+    ];
+  }
+
+  const data = await PaymentsModel.find(findQuery)
     .sort({ _id: -1 })
     .populate([
-      { path: "customer", model: "customers" },
-      { path: "job", model: "jobs" },
-      { path: "worker", model: "workers" },
-      { path: "mall", model: "malls" },
-      { path: "building", model: "buildings" },
+      {
+        path: "customer",
+        model: "customers",
+        select: "mobile firstName lastName",
+      },
+      { path: "job", model: "jobs" }, // Populating Job details if needed
+      { path: "worker", model: "workers", select: "name" },
+      { path: "mall", model: "malls", select: "name" },
+      { path: "building", model: "buildings", select: "name" },
     ])
     .lean();
 
   const workbook = new exceljs.Workbook();
-  const worksheet = workbook.addWorksheet("Report");
-  const keys = Object.keys(data[0]);
+  const worksheet = workbook.addWorksheet("Payments Report");
 
-  worksheet.addRow(keys);
+  // Define Columns explicitly for clarity
+  worksheet.columns = [
+    { header: "Date", key: "createdAt", width: 15 },
+    { header: "Time", key: "time", width: 15 },
+    { header: "Vehicle No", key: "vehicle", width: 20 },
+    { header: "Parking No", key: "parking_no", width: 15 },
+    { header: "Worker", key: "worker", width: 25 },
+    // { header: "Customer", key: "customer", width: 20 },
+    { header: "Location", key: "location", width: 30 },
+    { header: "Amount Paid", key: "amount_paid", width: 15 },
+    { header: "Payment Mode", key: "payment_mode", width: 15 },
+    { header: "Status", key: "status", width: 15 },
+    { header: "Settle Status", key: "settled", width: 15 },
+  ];
 
-  for (const iterator of data) {
-    iterator.createdAt = moment(iterator.createdAt).format("YYYY-MM-DD");
-    iterator.vehicle = iterator?.vehicle?.registration_no || "";
-    iterator.parking_no = iterator?.vehicle?.parking_no || "";
-    iterator.worker = iterator?.worker?.name;
-    iterator.customer = iterator?.customer?.mobile;
-    iterator.mall = iterator?.mall?.name || "";
-    iterator.building = iterator?.building?.name || "";
+  worksheet.getRow(1).font = { bold: true };
 
-    const values = [];
+  data.forEach((item) => {
+    const dateObj = new Date(item.createdAt);
 
-    for (const key of keys) {
-      values.push(iterator[key] !== undefined ? iterator[key] : "");
-    }
+    // Determine Location Name
+    let locationName = "";
+    if (item.mall && item.mall.name) locationName = item.mall.name;
+    else if (item.building && item.building.name)
+      locationName = item.building.name;
 
-    worksheet.addRow(values);
-  }
+    worksheet.addRow({
+      createdAt: moment(dateObj).format("YYYY-MM-DD"),
+      time: moment(dateObj).format("hh:mm A"),
+      vehicle: item.vehicle?.registration_no || "-",
+      parking_no: item.vehicle?.parking_no || "-",
+      worker: item.worker?.name || "Unassigned",
+      // customer: item.customer?.mobile || "-",
+      location: locationName || "-",
+      amount_paid: item.amount_paid || 0,
+      payment_mode: item.payment_mode || "-",
+      status: item.status || "pending",
+      settled: item.settled || "pending",
+    });
+  });
 
   return workbook;
 };
 
+// ... existing code ...
+// ... existing imports ...
+
+// ✅ FIXED: Bulk Update Status with Safety Checks & Logs
+service.bulkUpdateStatus = async (userInfo, payload) => {
+  try {
+    const { ids, status } = payload;
+    console.log("🔵 [SERVICE] Bulk Update Status Started");
+    console.log(`👉 IDs count: ${ids?.length}, Target Status: ${status}`);
+
+    if (!ids || ids.length === 0) {
+      console.warn("⚠️ [SERVICE] No IDs provided");
+      return;
+    }
+
+    // 1. Fetch current documents to calculate values correctly
+    const payments = await PaymentsModel.find({ _id: { $in: ids } });
+    console.log(`📦 [SERVICE] Found ${payments.length} documents to update`);
+
+    const bulkOps = [];
+
+    for (const payment of payments) {
+      const update = {
+        status: status, // 'completed' or 'pending'
+        updatedBy: userInfo._id,
+      };
+
+      // 2. ONLY Modify amounts if setting to COMPLETED
+      if (status === "completed") {
+        const total = Number(payment.total_amount) || 0;
+        const paid = Number(payment.amount_paid) || 0;
+
+        // Only auto-fill payment if they haven't paid fully yet
+        if (paid < total) {
+          console.log(
+            `💰 [SERVICE] Auto-settling payment ${payment._id}: Total ${total}, Paid ${paid} -> New Paid: ${total}`
+          );
+
+          update.amount_paid = total;
+          update.balance = 0; // Balance becomes 0
+          update.collectedDate = new Date(); // Mark collected now
+
+          // Only set payment mode if it's missing (don't overwrite if they set it before)
+          if (!payment.payment_mode) {
+            update.payment_mode = "cash";
+          }
+        }
+      }
+      // 3. If setting back to PENDING, we DO NOT reset money (safety)
+      // If you want to reset money on pending, tell me. For now, we leave money as is to prevent data loss.
+
+      // 4. Push to Bulk Operations
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: payment._id },
+          update: { $set: update }, // $set ONLY modifies specific fields, keeps Worker/Vehicle intact
+        },
+      });
+    }
+
+    if (bulkOps.length > 0) {
+      console.log(`🚀 [SERVICE] Executing ${bulkOps.length} updates...`);
+      const result = await PaymentsModel.bulkWrite(bulkOps);
+      console.log("✅ [SERVICE] Bulk write result:", JSON.stringify(result));
+    } else {
+      console.log("⚠️ [SERVICE] No operations to execute.");
+    }
+
+    return { message: "Updated successfully", count: ids.length };
+  } catch (error) {
+    console.error("❌ [SERVICE] Bulk Update Error:", error);
+    throw error;
+  }
+};
 service.monthlyStatement = async (userInfo, query) => {
   const findQuery = {
     isDeleted: false,

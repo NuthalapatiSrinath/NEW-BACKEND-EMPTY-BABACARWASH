@@ -200,3 +200,23 @@ controller.monthlyStatement = async (req, res) => {
       .json({ status: false, message: "Internal server error", error });
   }
 };
+// ... existing imports
+
+controller.bulkUpdateStatus = async (req, res) => {
+  try {
+    const { user, body } = req;
+    console.log("🔵 [CONTROLLER] Bulk Status Request Received");
+    console.log("👤 User:", user.name, user.role);
+    console.log("📦 Body:", JSON.stringify(body)); // See what frontend sends
+
+    const data = await service.bulkUpdateStatus(user, body);
+
+    console.log("✅ [CONTROLLER] Bulk Status Success");
+    return res.status(200).json({ statusCode: 200, message: "success", data });
+  } catch (error) {
+    console.error("❌ [CONTROLLER] Bulk Status Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
+  }
+};
