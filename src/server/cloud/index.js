@@ -1,3 +1,3 @@
 module.exports = {
-    aws: require('./aws/index')
-}
+  oracle: require("./oracle"),
+};

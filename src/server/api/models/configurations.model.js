@@ -1,12 +1,15 @@
-'use strict'
+"use strict";
 
-const mongoose = require('mongoose');
-const schema = new mongoose.Schema({
-    contactNumber: { type: String }
-}, {
+const mongoose = require("mongoose");
+const schema = new mongoose.Schema(
+  {
+    contactNumber: { type: String },
+  },
+  {
     versionKey: false,
     strict: false,
-    timestamps: true
-});
+    timestamps: true,
+  }
+);
 
-module.exports = mongoose.model('configurations', schema);
+module.exports = mongoose.model("configurations", schema);
