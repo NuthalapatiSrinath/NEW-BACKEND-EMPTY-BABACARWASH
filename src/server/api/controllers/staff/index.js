@@ -91,15 +91,24 @@ router.delete(
 );
 
 // ==========================================
-// 📂 DOCUMENT MANAGEMENT
+// 📂 DOCUMENT & IMAGE MANAGEMENT
 // ==========================================
 
-// Upload Document
+// ✅ NEW: Upload Profile Image (This fixes the 404 error)
+router.post(
+  "/:id/profile-image",
+  AuthHelper.authenticate,
+  permit(MODULE, "edit"), // Changing profile pic is an 'edit' action
+  UploadHelper.upload, // Middleware to handle the file upload
+  controller.uploadProfileImage
+);
+
+// Upload Document (Passport, Visa, EID)
 router.post(
   "/:id/upload-document",
   AuthHelper.authenticate,
-  permit(MODULE, "edit"), // Uploading a doc is an 'edit' action
-  UploadHelper.upload, // Middleware to handle file parsing
+  permit(MODULE, "edit"),
+  UploadHelper.upload,
   controller.uploadDocument
 );
 
@@ -107,7 +116,7 @@ router.post(
 router.delete(
   "/:id/document",
   AuthHelper.authenticate,
-  permit(MODULE, "delete"), // Deleting a doc is a 'delete' action
+  permit(MODULE, "delete"),
   controller.deleteDocument
 );
 

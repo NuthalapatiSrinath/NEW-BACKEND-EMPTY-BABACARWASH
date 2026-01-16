@@ -18,97 +18,99 @@ const service = module.exports;
 
 service.list = async (userInfo, query) => {
   const paginationData = CommonHelper.paginationData(query);
+  const search = query.search ? query.search.trim() : "";
+
+  // Base Query
   const findQuery = {
     isDeleted: false,
     "vehicles.status": Number(query.status) || 1,
-    ...(query.search
-      ? {
-          $or: [
-            { mobile: { $regex: query.search, $options: "i" } },
-            { flat_no: { $regex: query.search, $options: "i" } },
-            {
-              "vehicles.registration_no": {
-                $regex: query.search,
-                $options: "i",
-              },
-            },
-            { "vehicles.parking_no": { $regex: query.search, $options: "i" } },
-          ],
-        }
-      : null),
   };
 
-  if (query.search) {
+  if (search) {
+    const searchRegex = { $regex: search, $options: "i" };
+    const orConditions = [
+      { mobile: searchRegex },
+      { flat_no: searchRegex },
+      { "vehicles.registration_no": searchRegex },
+      { "vehicles.parking_no": searchRegex },
+    ];
+
+    // ✅ FIX: Handle Space in Name Search (e.g., "John Doe")
+    const nameParts = search.split(/\s+/); // Split by space
+    if (nameParts.length > 1) {
+      // If search has space, try to match First + Last Name combination
+      orConditions.push({
+        $and: [
+          { firstName: { $regex: nameParts[0], $options: "i" } },
+          { lastName: { $regex: nameParts.slice(1).join(" "), $options: "i" } },
+        ],
+      });
+    } else {
+      // Single word search -> Check both fields independently
+      orConditions.push({ firstName: searchRegex });
+      orConditions.push({ lastName: searchRegex });
+    }
+
+    // Add Building & Worker Search Logic (Existing)
     const buildings = await BuildingsModel.find(
-      { isDeleted: false, name: { $regex: query.search, $options: "i" } },
+      { isDeleted: false, name: searchRegex },
       { _id: 1 }
     ).lean();
-
     if (buildings.length) {
-      findQuery.$or.push({
-        building: { $in: buildings.map((e) => e._id.toString()) },
-      });
+      orConditions.push({ building: { $in: buildings.map((e) => e._id) } });
     }
 
     const workers = await WorkersModel.find(
-      { isDeleted: false, name: { $regex: query.search, $options: "i" } },
+      { isDeleted: false, name: searchRegex },
       { _id: 1 }
     ).lean();
-
     if (workers.length) {
-      findQuery.$or.push({
-        "vehicles.worker": { $in: workers.map((e) => e._id.toString()) },
+      orConditions.push({
+        "vehicles.worker": { $in: workers.map((e) => e._id) },
       });
     }
+
+    // Combine all conditions with OR
+    findQuery.$or = orConditions;
   }
 
-  // ✅ COUNT CUSTOMERS (Matches Pagination Logic)
+  // Count Total
   const total = await CustomersModel.countDocuments(findQuery);
 
+  // Fetch Data
   let data = await CustomersModel.find(findQuery)
     .sort({ _id: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
     .lean();
 
-  // Populate references
+  // Populate References (Building & Worker)
   for (let customer of data) {
     if (customer.building) {
-      try {
-        const building = await BuildingsModel.findOne({
-          _id: customer.building,
-          isDeleted: false,
-        })
-          .populate("location_id")
-          .lean();
-        customer.building = building || null;
-      } catch (e) {
-        customer.building = null;
-      }
+      const building = await BuildingsModel.findOne({
+        _id: customer.building,
+        isDeleted: false,
+      })
+        .populate("location_id")
+        .lean();
+      customer.building = building || null;
     }
 
     if (customer.vehicles && customer.vehicles.length > 0) {
       for (let vehicle of customer.vehicles) {
         if (vehicle.worker) {
-          try {
-            const worker = await WorkersModel.findOne({
-              _id: vehicle.worker,
-              isDeleted: false,
-            }).lean();
-            vehicle.worker = worker || null;
-          } catch (e) {
-            vehicle.worker = null;
-          }
+          const worker = await WorkersModel.findOne({
+            _id: vehicle.worker,
+            isDeleted: false,
+          }).lean();
+          vehicle.worker = worker || null;
         }
       }
+      // Filter vehicles based on active tab status
+      customer.vehicles = customer.vehicles.filter(
+        (v) => v.status === (Number(query.status) || 1)
+      );
     }
-  }
-
-  // Filter vehicles for display
-  for (const iterator of data) {
-    iterator.vehicles = iterator.vehicles.filter(
-      (e) => e.status == (Number(query.status) || 1)
-    );
   }
 
   return { total, data };

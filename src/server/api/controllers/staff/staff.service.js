@@ -1,5 +1,5 @@
 const StaffModel = require("../../models/staff.model");
-const SiteModel = require("../../models/sites.model"); // ✅ Import Site Model
+const SiteModel = require("../../models/sites.model");
 const CounterService = require("../../../utils/counters");
 const CommonHelper = require("../../../helpers/common.helper");
 const oracleService = require("../../../cloud/oracle");
@@ -9,9 +9,19 @@ const axios = require("axios");
 
 const service = module.exports;
 
-// --- LIST (Fixed 500 Error) ---
+// ✅ HELPER: Safely parse dates from Excel
+// Prevents "ERR_ASSERTION" crashes if Excel sends invalid date formats
+const parseExcelDate = (value) => {
+  if (!value) return undefined;
+  const date = new Date(value);
+  // Check if date is valid (getTime is not NaN)
+  return isNaN(date.getTime()) ? undefined : date;
+};
+
+// --- LIST ---
 service.list = async (userInfo, query) => {
   const paginationData = CommonHelper.paginationData(query);
+
   const findQuery = {
     isDeleted: false,
     ...(query.search
@@ -21,7 +31,12 @@ service.list = async (userInfo, query) => {
             { employeeCode: { $regex: query.search, $options: "i" } },
             { companyName: { $regex: query.search, $options: "i" } },
             { passportNumber: { $regex: query.search, $options: "i" } },
+            { visaNumber: { $regex: query.search, $options: "i" } }, // ✅ Added
             { emiratesId: { $regex: query.search, $options: "i" } },
+            { mobile: { $regex: query.search, $options: "i" } }, // ✅ Added
+            { email: { $regex: query.search, $options: "i" } }, // ✅ Added
+            // Search by site string if it was imported as text
+            { site: { $regex: query.search, $options: "i" } },
           ],
         }
       : null),
@@ -32,18 +47,18 @@ service.list = async (userInfo, query) => {
     .sort({ visaExpiry: 1, _id: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
-    // .populate("site") // ❌ REMOVED to fix CastError (Downtown Dubai is not an ID)
+    // .populate("site") // ❌ REMOVED: Prevents crash if site is a String
     .lean();
 
-  // Manual population if needed, or send as is
-  // (Frontend handles strings gracefully)
   return { total, data };
 };
 
+// --- INFO ---
 service.info = async (userInfo, id) => {
   return StaffModel.findOne({ _id: id, isDeleted: false }).lean();
 };
 
+// --- CREATE ---
 service.create = async (userInfo, payload) => {
   const query = { isDeleted: false, $or: [] };
   if (payload.employeeCode)
@@ -66,6 +81,7 @@ service.create = async (userInfo, payload) => {
   await new StaffModel(data).save();
 };
 
+// --- UPDATE ---
 service.update = async (userInfo, id, payload) => {
   if (payload.employeeCode) {
     const isExists = await StaffModel.countDocuments({
@@ -79,6 +95,7 @@ service.update = async (userInfo, id, payload) => {
   await StaffModel.updateOne({ _id: id }, { $set: data });
 };
 
+// --- DELETE ---
 service.delete = async (userInfo, id, reason) => {
   return await StaffModel.updateOne(
     { _id: id },
@@ -86,6 +103,7 @@ service.delete = async (userInfo, id, reason) => {
   );
 };
 
+// --- UNDO DELETE ---
 service.undoDelete = async (userInfo, id) => {
   return await StaffModel.updateOne(
     { _id: id },
@@ -93,6 +111,7 @@ service.undoDelete = async (userInfo, id) => {
   );
 };
 
+// --- UPLOAD DOCUMENT ---
 service.uploadDocument = async (userInfo, id, documentType, fileData) => {
   const fieldMap = {
     Passport: "passportDocument",
@@ -105,8 +124,11 @@ service.uploadDocument = async (userInfo, id, documentType, fileData) => {
   const staff = await StaffModel.findById(id);
   if (!staff) throw new Error("Staff not found");
 
+  // Delete old file if exists
   if (staff[fieldName]?.filename) {
-    await oracleService.deleteFile(staff[fieldName].filename);
+    try {
+      await oracleService.deleteFile(staff[fieldName].filename);
+    } catch (e) {}
   }
 
   const filePath = fileData.path;
@@ -135,6 +157,42 @@ service.uploadDocument = async (userInfo, id, documentType, fileData) => {
   return documentData;
 };
 
+// --- UPLOAD PROFILE IMAGE ---
+service.uploadProfileImage = async (userInfo, id, fileData) => {
+  const staff = await StaffModel.findById(id);
+  if (!staff) throw new Error("Staff not found");
+
+  if (staff.profileImage?.filename) {
+    try {
+      await oracleService.deleteFile(staff.profileImage.filename);
+    } catch (e) {}
+  }
+
+  const filePath = fileData.path;
+  const ext = path.extname(fileData.filename) || ".jpg";
+  const oracleFileName = `staff-profile-${id}-${Date.now()}${ext}`;
+
+  const publicUrl = await oracleService.uploadFile(filePath, oracleFileName);
+
+  try {
+    fs.unlinkSync(filePath);
+  } catch (e) {}
+
+  const imageData = {
+    url: publicUrl,
+    publicId: oracleFileName,
+    filename: oracleFileName,
+  };
+
+  await StaffModel.updateOne(
+    { _id: id },
+    { $set: { profileImage: imageData, updatedBy: userInfo._id } }
+  );
+
+  return imageData;
+};
+
+// --- DELETE DOCUMENT ---
 service.deleteDocument = async (userInfo, id, documentType) => {
   const staff = await StaffModel.findById(id);
   const fieldMap = {
@@ -153,6 +211,7 @@ service.deleteDocument = async (userInfo, id, documentType) => {
   );
 };
 
+// --- GET EXPIRING DOCUMENTS ---
 service.getExpiringDocuments = async () => {
   const twoMonthsFromNow = new Date();
   twoMonthsFromNow.setMonth(twoMonthsFromNow.getMonth() + 2);
@@ -189,6 +248,7 @@ service.getExpiringDocuments = async () => {
   }));
 };
 
+// --- GENERATE TEMPLATE (Complete Fields) ---
 service.generateTemplate = async () => {
   const ExcelJS = require("exceljs");
   const workbook = new ExcelJS.Workbook();
@@ -197,6 +257,8 @@ service.generateTemplate = async () => {
   worksheet.columns = [
     { header: "Employee Code", key: "employeeCode", width: 15 },
     { header: "Name", key: "name", width: 25 },
+    { header: "Mobile", key: "mobile", width: 15 }, // ✅ Added
+    { header: "Email", key: "email", width: 25 }, // ✅ Added
     { header: "Company", key: "companyName", width: 20 },
     { header: "Site", key: "site", width: 20 },
     { header: "Joining Date (YYYY-MM-DD)", key: "joiningDate", width: 20 },
@@ -207,6 +269,7 @@ service.generateTemplate = async () => {
       width: 20,
     },
     { header: "Passport Document URL", key: "passportDocumentUrl", width: 50 },
+    { header: "Visa Number", key: "visaNumber", width: 15 }, // ✅ Added
     { header: "Visa Expiry (YYYY-MM-DD)", key: "visaExpiry", width: 20 },
     { header: "Visa Document URL", key: "visaDocumentUrl", width: 50 },
     { header: "Emirates ID", key: "emiratesId", width: 20 },
@@ -224,6 +287,7 @@ service.generateTemplate = async () => {
   return await workbook.xlsx.writeBuffer();
 };
 
+// --- EXPORT DATA (Complete Fields) ---
 service.exportData = async (userInfo, query) => {
   const ExcelJS = require("exceljs");
   const workbook = new ExcelJS.Workbook();
@@ -235,27 +299,40 @@ service.exportData = async (userInfo, query) => {
   worksheet.columns = [
     { header: "Employee Code", key: "employeeCode", width: 15 },
     { header: "Name", key: "name", width: 25 },
+    { header: "Mobile", key: "mobile", width: 15 }, // ✅ Added
+    { header: "Email", key: "email", width: 25 }, // ✅ Added
     { header: "Company", key: "companyName", width: 20 },
     { header: "Site", key: "site", width: 20 },
     { header: "Joining Date", key: "joiningDate", width: 20 },
     { header: "Passport Number", key: "passportNumber", width: 15 },
     { header: "Passport Expiry", key: "passportExpiry", width: 20 },
+    { header: "Visa Number", key: "visaNumber", width: 15 }, // ✅ Added
+    { header: "Visa Expiry", key: "visaExpiry", width: 20 },
+    { header: "Emirates ID", key: "emiratesId", width: 20 },
+    { header: "Emirates ID Expiry", key: "emiratesIdExpiry", width: 20 },
   ];
 
   staffData.forEach((staff) => {
     worksheet.addRow({
       employeeCode: staff.employeeCode,
       name: staff.name,
+      mobile: staff.mobile,
+      email: staff.email,
       companyName: staff.companyName,
-      site: staff.site?.name || staff.site || "",
+      site: typeof staff.site === "object" ? staff.site?.name : staff.site,
       joiningDate: staff.joiningDate,
       passportNumber: staff.passportNumber,
       passportExpiry: staff.passportExpiry,
+      visaNumber: staff.visaNumber, // ✅ Added
+      visaExpiry: staff.visaExpiry,
+      emiratesId: staff.emiratesId,
+      emiratesIdExpiry: staff.emiratesIdExpiry,
     });
   });
   return await workbook.xlsx.writeBuffer();
 };
 
+// --- IMPORT EXCEL ---
 service.importDataFromExcel = async (userInfo, fileBuffer) => {
   const ExcelJS = require("exceljs");
   const workbook = new ExcelJS.Workbook();
@@ -268,17 +345,20 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
     const rowData = {
       employeeCode: row.getCell(1).value?.toString() || "",
       name: row.getCell(2).value?.toString() || "",
-      companyName: row.getCell(3).value?.toString() || "",
-      site: row.getCell(4).value?.toString() || "", // Column D
-      joiningDate: row.getCell(5).value,
-      passportNumber: row.getCell(6).value?.toString() || "",
-      passportExpiry: row.getCell(7).value,
-      passportDocumentUrl: row.getCell(8).value?.toString() || "",
-      visaExpiry: row.getCell(9).value,
-      visaDocumentUrl: row.getCell(10).value?.toString() || "",
-      emiratesId: row.getCell(11).value?.toString() || "",
-      emiratesIdExpiry: row.getCell(12).value,
-      emiratesIdDocumentUrl: row.getCell(13).value?.toString() || "",
+      mobile: row.getCell(3).value?.toString() || "", // ✅ Added
+      email: row.getCell(4).value?.toString() || "", // ✅ Added
+      companyName: row.getCell(5).value?.toString() || "",
+      site: row.getCell(6).value?.toString() || "",
+      joiningDate: row.getCell(7).value,
+      passportNumber: row.getCell(8).value?.toString() || "",
+      passportExpiry: row.getCell(9).value,
+      passportDocumentUrl: row.getCell(10).value?.toString() || "",
+      visaNumber: row.getCell(11).value?.toString() || "", // ✅ Added
+      visaExpiry: row.getCell(12).value,
+      visaDocumentUrl: row.getCell(13).value?.toString() || "",
+      emiratesId: row.getCell(14).value?.toString() || "",
+      emiratesIdExpiry: row.getCell(15).value,
+      emiratesIdDocumentUrl: row.getCell(16).value?.toString() || "",
     };
     excelData.push(rowData);
   });
@@ -286,6 +366,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
   return await service.importDataWithOracle(userInfo, excelData);
 };
 
+// --- IMPORT LOGIC (Safe Date & Full Fields) ---
 service.importDataWithOracle = async (userInfo, csvData) => {
   const results = { success: 0, errors: [] };
 
@@ -306,42 +387,35 @@ service.importDataWithOracle = async (userInfo, csvData) => {
           isDeleted: false,
         });
       }
-      if (!staff && row.name && row.companyName) {
-        staff = await StaffModel.findOne({
-          name: new RegExp(`^${row.name.trim()}$`, "i"),
-          companyName: new RegExp(`^${row.companyName.trim()}$`, "i"),
-          isDeleted: false,
-        });
-      }
 
-      // ✅ SITE LOOKUP (Fixes CastError)
-      let siteId = null;
+      // Site Lookup (String or ID)
+      let siteId = row.site;
       if (row.site) {
-        // Try to find site ID by name
         const siteDoc = await SiteModel.findOne({
           name: { $regex: new RegExp(`^${row.site.trim()}$`, "i") },
         });
         if (siteDoc) {
-          siteId = siteDoc._id; // Use valid ObjectId
-        } else {
-          siteId = row.site; // Fallback to string (Frontend handles it)
+          siteId = siteDoc._id;
         }
       }
 
       const staffData = {
         name: row.name,
+        mobile: row.mobile, // ✅ Added
+        email: row.email, // ✅ Added
         companyName: row.companyName,
         site: siteId,
-        joiningDate: row.joiningDate ? new Date(row.joiningDate) : undefined,
+        joiningDate: parseExcelDate(row.joiningDate), // ✅ Safe Date
+
         passportNumber: row.passportNumber,
-        passportExpiry: row.passportExpiry
-          ? new Date(row.passportExpiry)
-          : undefined,
-        visaExpiry: row.visaExpiry ? new Date(row.visaExpiry) : undefined,
+        passportExpiry: parseExcelDate(row.passportExpiry),
+
+        visaNumber: row.visaNumber, // ✅ Added
+        visaExpiry: parseExcelDate(row.visaExpiry),
+
         emiratesId: row.emiratesId,
-        emiratesIdExpiry: row.emiratesIdExpiry
-          ? new Date(row.emiratesIdExpiry)
-          : undefined,
+        emiratesIdExpiry: parseExcelDate(row.emiratesIdExpiry),
+
         updatedBy: userInfo._id,
       };
 
@@ -352,6 +426,7 @@ service.importDataWithOracle = async (userInfo, csvData) => {
           "passport"
         );
       }
+      // You can replicate logic for Visa URL / EID URL if needed
 
       if (staff) {
         await StaffModel.updateOne({ _id: staff._id }, { $set: staffData });
