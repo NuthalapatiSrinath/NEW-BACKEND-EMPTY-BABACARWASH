@@ -65,7 +65,7 @@ const _uploadFromUrl = async (url, workerId, docType) => {
 };
 
 // ==========================================
-// 🟢 WORKER LOGIC (UPDATED)
+// 🟢 WORKER LOGIC
 // ==========================================
 
 service.list = async (userInfo, query) => {
@@ -97,8 +97,8 @@ service.list = async (userInfo, query) => {
 
     // --- Filters ---
     ...(query.mall ? { malls: { $in: [query.mall] } } : null),
-    ...(query.building ? { buildings: { $in: [query.building] } } : null), // ✅ Added Building Filter
-    ...(query.site ? { sites: { $in: [query.site] } } : null), // ✅ Added Site Filter
+    ...(query.building ? { buildings: { $in: [query.building] } } : null),
+    ...(query.site ? { sites: { $in: [query.site] } } : null),
     ...(query.service_type ? { service_type: query.service_type } : null),
   };
 
@@ -118,7 +118,7 @@ service.list = async (userInfo, query) => {
         populate: [{ path: "location_id", model: "locations" }],
       },
       { path: "malls", model: "malls" },
-      { path: "sites", model: "sites" }, // ✅ Populate Sites
+      { path: "sites", model: "sites" },
     ])
     .lean();
 
@@ -130,13 +130,12 @@ service.info = async (userInfo, id) => {
     .populate([
       { path: "buildings", model: "buildings" },
       { path: "malls", model: "malls" },
-      { path: "sites", model: "sites" }, // ✅ Populate Sites
+      { path: "sites", model: "sites" },
     ])
     .lean();
 };
 
 service.create = async (userInfo, payload) => {
-  // Merged Check: Mobile (Existing) OR Employee Code (New)
   const query = { isDeleted: false, $or: [{ mobile: payload.mobile }] };
   if (payload.employeeCode)
     query.$or.push({ employeeCode: payload.employeeCode });
@@ -151,7 +150,6 @@ service.create = async (userInfo, payload) => {
     updatedBy: userInfo._id,
     id,
     ...payload,
-    // ✅ Store Plain Password AND Hash
     password: payload.password,
     hPassword: payload.password
       ? AuthHelper.getPasswordHash(payload.password)
@@ -165,7 +163,6 @@ service.update = async (userInfo, id, payload) => {
   const data = {
     updatedBy: userInfo._id,
     ...updateData,
-    // ✅ If password is being updated, save both plain text and hash
     ...(password
       ? {
           password: password,
@@ -503,7 +500,7 @@ service.generateTemplate = async () => {
     { header: "Name", key: "name", width: 30 },
     { header: "Mobile", key: "mobile", width: 15 },
     { header: "Employee Code", key: "employeeCode", width: 15 },
-    { header: "Company", key: "companyName", width: 25 },
+    // ✅ REMOVED COMPANY (Col 4)
     { header: "Joining Date (DD/MM/YYYY)", key: "joiningDate", width: 20 },
     { header: "Passport No.", key: "passportNumber", width: 15 },
     {
@@ -521,7 +518,7 @@ service.generateTemplate = async () => {
     name: "John Doe Sample",
     mobile: "971501234567",
     employeeCode: "EMP001",
-    companyName: "Best Car Wash",
+    // Company was here
     joiningDate: "01/01/2024",
     passportNumber: "N123456",
     passportExpiry: "01/01/2030",
@@ -539,13 +536,11 @@ service.exportData = async (userInfo, query) => {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet("Workers");
 
-  // ✅ BUILD QUERY BASED ON STATUS
   const findQuery = {
     isDeleted: false,
     status: query.status ? Number(query.status) : 1,
   };
 
-  // Supervisor Restrictions
   if (userInfo.role == "supervisor" && userInfo.service_type == "mall") {
     findQuery.malls = { $in: [userInfo.mall] };
   }
@@ -558,7 +553,7 @@ service.exportData = async (userInfo, query) => {
   const workers = await WorkersModel.find(findQuery)
     .populate("malls")
     .populate("buildings")
-    .populate("sites") // ✅ Export Sites info
+    .populate("sites")
     .lean();
 
   worksheet.columns = [
@@ -615,10 +610,8 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
   const excelData = [];
 
   worksheet.eachRow((row, rowNumber) => {
-    // 1. Skip Header
     if (rowNumber === 1) return;
 
-    // 2. Get Raw Data
     const rawName = getCellText(row.getCell(1));
     const rawMobile = getCellText(row.getCell(2));
 
@@ -626,7 +619,6 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       `🔍 Reading Row ${rowNumber}: Name="${rawName}", Mobile="${rawMobile}"`,
     );
 
-    // 3. Skip ONLY if completely empty
     if (!rawName && !rawMobile) {
       console.log(`⚠️ Skipped empty row at ${rowNumber}`);
       return;
@@ -636,14 +628,17 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       name: rawName,
       mobile: rawMobile,
       employeeCode: getCellText(row.getCell(3)),
-      companyName: getCellText(row.getCell(4)),
-      joiningDate: row.getCell(5).value,
-      passportNumber: getCellText(row.getCell(6)),
-      passportExpiry: row.getCell(7).value,
-      visaNumber: getCellText(row.getCell(8)),
-      visaExpiry: row.getCell(9).value,
-      emiratesId: getCellText(row.getCell(10)),
-      emiratesIdExpiry: row.getCell(11).value,
+
+      // ✅ COLUMN MAPPING FIX:
+      // Col 1: Name, Col 2: Mobile, Col 3: Code
+      // Col 4: Joining Date (This was previously mapped to companyName)
+      joiningDate: row.getCell(4).value,
+      passportNumber: getCellText(row.getCell(5)),
+      passportExpiry: row.getCell(6).value,
+      visaNumber: getCellText(row.getCell(7)),
+      visaExpiry: row.getCell(8).value,
+      emiratesId: getCellText(row.getCell(9)),
+      emiratesIdExpiry: row.getCell(10).value,
     });
   });
 
@@ -657,19 +652,22 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         throw new Error("Mobile number is required");
       }
 
-      // Check if exists
-      let worker = await WorkersModel.findOne({
-        mobile: row.mobile,
-        isDeleted: false,
-      });
+      // Find match by Mobile OR Emp Code (including deleted)
+      const searchCriteria = [{ mobile: row.mobile }];
+      if (row.employeeCode)
+        searchCriteria.push({ employeeCode: row.employeeCode });
+
+      let worker = await WorkersModel.findOne({ $or: searchCriteria });
 
       const workerData = {
         name: row.name,
         mobile: row.mobile,
         employeeCode: row.employeeCode,
-        companyName: row.companyName,
 
-        service_type: "residence", // Default
+        // ✅ EXPLICITLY RESET COMPANY NAME TO EMPTY
+        companyName: "",
+
+        service_type: "residence",
         malls: [],
         buildings: [],
         sites: [],
@@ -687,6 +685,21 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
 
       if (worker) {
         console.log(`🔄 Updating: ${row.name}`);
+
+        // If reactivating a deleted worker, clear sensitive fields too
+        if (worker.isDeleted) {
+          console.log(`♻️ Reactivating and Wiping Old Data for: ${row.name}`);
+          workerData.isDeleted = false;
+          workerData.status = 1;
+          workerData.email = "";
+          workerData.password = "";
+          workerData.hPassword = "";
+          workerData.profileImage = null;
+          workerData.passportDocument = null;
+          workerData.visaDocument = null;
+          workerData.emiratesIdDocument = null;
+        }
+
         await WorkersModel.updateOne({ _id: worker._id }, { $set: workerData });
       } else {
         console.log(`➕ Creating: ${row.name}`);
