@@ -10,19 +10,17 @@ const schema = new mongoose.Schema(
     mobile: { type: String, required: true },
     password: { type: String }, // For app login
     hPassword: { type: String }, // Security hash
-
-    // ✅ EXISTING ASSIGNMENT LOGIC
-    // We keep these exactly as they are in Workers (but defined as ObjectIds for safety)
+    // ✅ ASSIGNMENT LOGIC (Updated)
     buildings: [{ type: mongoose.Schema.Types.ObjectId, ref: "buildings" }],
     malls: [{ type: mongoose.Schema.Types.ObjectId, ref: "malls" }],
+    sites: [{ type: mongoose.Schema.Types.ObjectId, ref: "sites" }], // ✅ Added Sites
 
-    // This field helps filter logic in your service (e.g., for supervisors)
+    // ✅ Updated Enum to include 'site' and 'mobile'
     service_type: {
       type: String,
-      enum: ["mall", "residence"],
+      enum: ["mall", "residence", "site", "mobile"],
       default: "residence",
     },
-
     role: {
       type: String,
       enum: ["worker", "supervisor"],

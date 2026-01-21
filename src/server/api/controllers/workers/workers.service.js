@@ -65,7 +65,7 @@ const _uploadFromUrl = async (url, workerId, docType) => {
 };
 
 // ==========================================
-// 🟢 EXISTING WORKER LOGIC (PRESERVED)
+// 🟢 WORKER LOGIC (UPDATED)
 // ==========================================
 
 service.list = async (userInfo, query) => {
@@ -78,10 +78,12 @@ service.list = async (userInfo, query) => {
           $or: [
             { name: { $regex: query.search, $options: "i" } },
             { mobile: { $regex: query.search, $options: "i" } },
-            { employeeCode: { $regex: query.search, $options: "i" } }, // Added Search by Employee Code
+            { employeeCode: { $regex: query.search, $options: "i" } },
           ],
         }
       : null),
+
+    // --- Supervisor Logic ---
     ...(userInfo.role == "supervisor" && userInfo.service_type == "mall"
       ? { malls: { $in: [userInfo.mall] } }
       : null),
@@ -92,7 +94,11 @@ service.list = async (userInfo, query) => {
           },
         }
       : null),
+
+    // --- Filters ---
     ...(query.mall ? { malls: { $in: [query.mall] } } : null),
+    ...(query.building ? { buildings: { $in: [query.building] } } : null), // ✅ Added Building Filter
+    ...(query.site ? { sites: { $in: [query.site] } } : null), // ✅ Added Site Filter
     ...(query.service_type ? { service_type: query.service_type } : null),
   };
 
@@ -112,6 +118,7 @@ service.list = async (userInfo, query) => {
         populate: [{ path: "location_id", model: "locations" }],
       },
       { path: "malls", model: "malls" },
+      { path: "sites", model: "sites" }, // ✅ Populate Sites
     ])
     .lean();
 
@@ -123,6 +130,7 @@ service.info = async (userInfo, id) => {
     .populate([
       { path: "buildings", model: "buildings" },
       { path: "malls", model: "malls" },
+      { path: "sites", model: "sites" }, // ✅ Populate Sites
     ])
     .lean();
 };
@@ -143,6 +151,8 @@ service.create = async (userInfo, payload) => {
     updatedBy: userInfo._id,
     id,
     ...payload,
+    // ✅ Store Plain Password AND Hash
+    password: payload.password,
     hPassword: payload.password
       ? AuthHelper.getPasswordHash(payload.password)
       : undefined,
@@ -155,7 +165,13 @@ service.update = async (userInfo, id, payload) => {
   const data = {
     updatedBy: userInfo._id,
     ...updateData,
-    ...(password ? { hPassword: AuthHelper.getPasswordHash(password) } : {}),
+    // ✅ If password is being updated, save both plain text and hash
+    ...(password
+      ? {
+          password: password,
+          hPassword: AuthHelper.getPasswordHash(password),
+        }
+      : {}),
   };
   await WorkersModel.updateOne({ _id: id }, { $set: data });
 };
@@ -258,6 +274,7 @@ service.washesList = async (userInfo, query, workerId) => {
   let total = 0;
   let data = [];
 
+  // Logic to switch collections based on service type
   if (query.service_type && query.service_type == "residence") {
     await JobsModel.updateMany(
       {
@@ -474,7 +491,7 @@ service.getExpiringDocuments = async () => {
 };
 
 // ==========================================
-// 🔵 IMPORT / EXPORT / TEMPLATE (UPDATED)
+// 🔵 IMPORT / EXPORT / TEMPLATE
 // ==========================================
 
 service.generateTemplate = async () => {
@@ -482,7 +499,6 @@ service.generateTemplate = async () => {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet("Workers Template");
 
-  // ✅ 1. COLUMNS: Removed "Assignment Type" and "Location"
   worksheet.columns = [
     { header: "Name", key: "name", width: 30 },
     { header: "Mobile", key: "mobile", width: 15 },
@@ -501,7 +517,6 @@ service.generateTemplate = async () => {
     { header: "EID Expiry (DD/MM/YYYY)", key: "emiratesIdExpiry", width: 20 },
   ];
 
-  // ✅ 2. SAMPLE ROW: Added dummy data for user reference
   worksheet.addRow({
     name: "John Doe Sample",
     mobile: "971501234567",
@@ -527,12 +542,10 @@ service.exportData = async (userInfo, query) => {
   // ✅ BUILD QUERY BASED ON STATUS
   const findQuery = {
     isDeleted: false,
-    // If status is provided in query, use it. Otherwise default to 1 (Active)
     status: query.status ? Number(query.status) : 1,
   };
 
-  // Optional: If you want Supervisors to only export their own workers, keep this logic.
-  // If Admin sees all, this is fine.
+  // Supervisor Restrictions
   if (userInfo.role == "supervisor" && userInfo.service_type == "mall") {
     findQuery.malls = { $in: [userInfo.mall] };
   }
@@ -545,9 +558,9 @@ service.exportData = async (userInfo, query) => {
   const workers = await WorkersModel.find(findQuery)
     .populate("malls")
     .populate("buildings")
+    .populate("sites") // ✅ Export Sites info
     .lean();
 
-  // ✅ Export also removed assignment columns to match import template
   worksheet.columns = [
     { header: "Name", key: "name", width: 25 },
     { header: "Mobile", key: "mobile", width: 15 },
@@ -579,7 +592,6 @@ service.exportData = async (userInfo, query) => {
   });
   return await workbook.xlsx.writeBuffer();
 };
-// ... (Previous imports and helpers remain the same)
 
 // ==========================================
 // 🔵 DEBUGGED IMPORT FUNCTION
@@ -620,14 +632,11 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       return;
     }
 
-    // ✅ REMOVED THE "SAMPLE" CHECK. Now it will accept "John Doe Sample"
-
     excelData.push({
       name: rawName,
       mobile: rawMobile,
       employeeCode: getCellText(row.getCell(3)),
       companyName: getCellText(row.getCell(4)),
-      // Manual Assignment logic means we ignore extra columns if they exist
       joiningDate: row.getCell(5).value,
       passportNumber: getCellText(row.getCell(6)),
       passportExpiry: row.getCell(7).value,
@@ -660,9 +669,10 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         employeeCode: row.employeeCode,
         companyName: row.companyName,
 
-        service_type: "residence",
+        service_type: "residence", // Default
         malls: [],
         buildings: [],
+        sites: [],
 
         joiningDate: parseExcelDate(row.joiningDate),
         passportNumber: row.passportNumber,
