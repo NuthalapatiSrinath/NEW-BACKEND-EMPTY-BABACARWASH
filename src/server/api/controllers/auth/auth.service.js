@@ -22,7 +22,7 @@ service.signup = async (payload) => {
 
   const userData = {
     ...payload,
-    password: passwordHash, // Save hash to password (optional, good for consistency)
+    password: passwordHash, // Save hash to pafssword (optional, good for consistency)
     hPassword: passwordHash, // ✅ CRITICAL FIX: Save hash to hPassword
     accountInfo: {
       accountId: uuidV4(),
