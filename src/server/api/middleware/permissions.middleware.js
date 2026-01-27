@@ -12,7 +12,7 @@ exports.hasAccess = (moduleName, actionType) => {
     try {
       const user = req.user; // Populated by your auth middleware
 
-      if (!user) return response.error(res, 401, "Unauthorized.");
+      if (!user) return res.status(401).json({ message: "Unauthorized." });
 
       // 1. Admin Override (Admins can do everything)
       if (user.role === "admin") return next();
@@ -28,14 +28,10 @@ exports.hasAccess = (moduleName, actionType) => {
         return next();
       }
 
-      return response.error(
-        res,
-        403,
-        "Access Denied: You do not have permission.",
-      );
+      return res.status(403).json({ message: "Access Denied: You do not have permission." });
     } catch (err) {
       console.error("RBAC Error:", err);
-      return response.error(res, 500, "Permission check failed.");
+      return res.status(500).json({ message: "Permission check failed." });
     }
   };
 };
@@ -51,11 +47,7 @@ exports.requireReason = (req, res, next) => {
   // if (req.user.role === 'admin') return next();
 
   if (!reason || typeof reason !== "string" || reason.trim().length < 3) {
-    return response.error(
-      res,
-      400,
-      "A valid 'reason' is required for this action.",
-    );
+    return res.status(400).json({ message: "A valid 'reason' is required for this action." });
   }
   next();
 };

@@ -322,7 +322,7 @@ service.exportData = async (userInfo, rawQuery) => {
   }
 };
 
-// --- MONTHLY STATEMENT (UPDATED WITH DAILY BREAKDOWN) ---
+// --- MONTHLY STATEMENT (UPDATED: TIPS CALCULATION + EXCEL FIXES) ---
 service.monthlyStatement = async (userInfo, query) => {
   const findQuery = {
     isDeleted: false,
@@ -333,100 +333,577 @@ service.monthlyStatement = async (userInfo, query) => {
     },
   };
 
+  // Add worker filter if workerId provided (and not empty string)
+  if (query.workerId && query.workerId.trim() !== "") {
+    findQuery.worker = query.workerId;
+  }
+
+  // Fetch all jobs for the month
   const data = await JobsModel.find(findQuery)
-    .sort({ _id: -1 })
+    .sort({ assignedDate: 1, _id: 1 })
     .populate([
       { path: "worker", model: "workers" },
       { path: "building", model: "buildings" },
+      { path: "customer", model: "customers" },
+      { path: "location", model: "locations" },
     ])
     .lean();
 
   const daysInMonth = moment(findQuery.assignedDate.$gte).daysInMonth();
+  const monthName = moment(findQuery.assignedDate.$gte).format("MMMM");
+  const year = moment(findQuery.assignedDate.$gte).format("YYYY");
 
-  // ✅ 1. Return JSON with DAILY data if format=json
-  if (query.format === "json") {
-    const workerMap = {};
-    for (const iterator of data) {
-      if (iterator.worker) {
-        const wid = iterator.worker._id.toString();
-        if (!workerMap[wid]) {
-          workerMap[wid] = {
-            name: iterator.worker.name?.trim() || "Unknown",
-            code: iterator.worker.employeeCode || "N/A",
-            totalCars: 0,
-            amount: 0,
-            daily: new Array(daysInMonth).fill(0), // Array of zeros
-          };
-        }
+  // =========================================================
+  // SCENARIO 1: WORKER SELECTED (Car-by-Car Detailed Report)
+  // =========================================================
+  if (query.workerId) {
+    const carMap = new Map();
 
-        // Calculate Day (1-31) -> Index (0-30)
-        // Note: For jobs, we use assignedDate or completedDate. Query filters by assignedDate.
-        const date = moment(iterator.assignedDate).tz("Asia/Dubai").date();
-        if (date >= 1 && date <= daysInMonth) {
-          workerMap[wid].daily[date - 1]++;
-        }
-
-        workerMap[wid].totalCars++;
+    data.forEach((job) => {
+      let vehicleInfo = null;
+      if (job.customer && job.customer.vehicles && job.vehicle) {
+        vehicleInfo = job.customer.vehicles.find(
+          (v) => v._id.toString() === job.vehicle.toString(),
+        );
       }
+
+      const carKey = job.vehicle
+        ? job.vehicle.toString()
+        : `unknown_${job._id}`;
+      const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
+
+      if (!carMap.has(carKey)) {
+        carMap.set(carKey, {
+          parkingNo: vehicleInfo?.parking_no || "",
+          carNumber: vehicleInfo?.registration_no || "",
+          dateOfStart: moment(job.assignedDate).format("DD-MMM"),
+          cleaning: job.immediate ? "D" : "W3",
+          dailyMarks: new Array(daysInMonth).fill(0),
+          amount: job.price || 0,
+          duDate: moment(job.completedDate || job.assignedDate).format(
+            "DD-MMM",
+          ),
+          workerName: job.worker?.name || "",
+          locationName: job.location?.name || "",
+          buildingName: job.building?.name || "",
+          tips: 0, // ✅ Initialize tips to 0
+        });
+      }
+
+      const carData = carMap.get(carKey);
+
+      // ✅ Accumulate Tips (Ensure it's a number)
+      carData.tips += Number(job.tips) || 0;
+
+      if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth) {
+        carData.dailyMarks[dayOfMonth - 1]++;
+      }
+    });
+
+    const carList = Array.from(carMap.values());
+
+    // If format is JSON (For PDF/Preview), return raw data
+    if (query.format === "json") {
+      return carList;
     }
-    return Object.values(workerMap);
+
+    // Note: Excel logic uses the same data structure below
   }
 
-  // ✅ 2. Return Excel Workbook (Default)
+  // =========================================================
+  // SCENARIO 2: NO WORKER SELECTED (Worker Summary Report)
+  // =========================================================
+  const workerMap = new Map();
+
+  data.forEach((job) => {
+    const workerId = job.worker?._id?.toString() || "unassigned";
+    const workerName = job.worker?.name || "Unassigned";
+    const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
+
+    if (!workerMap.has(workerId)) {
+      workerMap.set(workerId, {
+        workerId,
+        workerName,
+        dailyCounts: new Array(daysInMonth).fill(0),
+        tips: 0, // ✅ Initialize tips to 0
+      });
+    }
+
+    const workerData = workerMap.get(workerId);
+
+    // ✅ Accumulate Tips here (Fixing the 0 issue)
+    workerData.tips += Number(job.tips) || 0;
+
+    if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth) {
+      workerData.dailyCounts[dayOfMonth - 1]++;
+    }
+  });
+
+  const workerSummaries = Array.from(workerMap.values());
+
+  // ✅ Return JSON if requested
+  if (query.format === "json") {
+    return workerSummaries.map((worker, index) => ({
+      slNo: index + 1,
+      name: worker.workerName,
+      dailyCounts: worker.dailyCounts,
+      tips: worker.tips, // ✅ Send tips to frontend
+    }));
+  }
+
+  // =========================================================
+  // EXCEL GENERATION (Shared Logic)
+  // =========================================================
   const workbook = new exceljs.Workbook();
   const reportSheet = workbook.addWorksheet("Report");
 
-  const days = [
-    1,
-    ...new Array(moment(findQuery.assignedDate.$gte).daysInMonth() - 1)
-      .fill(0)
-      .map((_, i) => i + 2),
+  // Set row heights
+  reportSheet.getRow(1).height = 40;
+  reportSheet.getRow(2).height = 20;
+
+  const isWorkerSelected = query.workerId && data.length > 0;
+  const selectedWorkerName = isWorkerSelected
+    ? data[0]?.worker?.name
+    : "ALL WORKERS";
+  const locationName = isWorkerSelected
+    ? data[0]?.location?.name
+    : "RESIDENCE LOCATIONS";
+
+  // --- HEADER ROW 1: Company Name with Logo Space ---
+  // Adjusted columns to include "Tips" column
+  const totalCols = isWorkerSelected
+    ? 5 + daysInMonth + 3
+    : 2 + daysInMonth + 1;
+
+  reportSheet.mergeCells(1, 1, 1, totalCols);
+  const titleCell = reportSheet.getCell("A1");
+  titleCell.value = "BABA CAR WASHING&CLEANING L.L.C";
+
+  // Add logo image if it exists
+  const path = require("path");
+  const fs = require("fs");
+  const possibleLogoPaths = [
+    path.join(__dirname, "../../../../../admin-panel/public/carwash.jpeg"),
+    path.join(process.cwd(), "public/carwash.jpeg"),
+    path.join(process.cwd(), "../admin-panel/public/carwash.jpeg"),
   ];
-  const keys = ["Sl. No", "Name", ...days, "Total Cars"];
 
-  reportSheet.addRow(keys);
-
-  const workerMap = {};
-
-  for (const iterator of JSON.parse(JSON.stringify(data))) {
-    if (iterator.worker) {
-      if (workerMap[iterator.worker._id]) {
-        workerMap[iterator.worker._id].push(iterator);
-      } else {
-        workerMap[iterator.worker._id] = [iterator];
-      }
+  let logoPath = null;
+  for (const testPath of possibleLogoPaths) {
+    if (fs.existsSync(testPath)) {
+      logoPath = testPath;
+      break;
     }
   }
 
-  let count = 1;
+  if (logoPath) {
+    try {
+      const imageId = workbook.addImage({
+        filename: logoPath,
+        extension: "jpeg",
+      });
 
-  for (const worker in workerMap) {
-    let workerData = workerMap[worker];
-    let daywiseMap = {};
-    let daywiseCounts = {};
-    let totalCars = 0;
+      reportSheet.addImage(imageId, {
+        tl: { col: 0, row: 0 },
+        ext: { width: 80, height: 40 },
+        editAs: "oneCell",
+      });
+    } catch (err) {
+      console.warn("Could not add logo to Excel:", err.message);
+    }
+  }
 
-    for (const iterator of workerData) {
-      let date = moment(iterator.assignedDate).tz("Asia/Dubai").date();
-      if (daywiseMap[date]) {
-        daywiseMap[date].push(iterator);
-      } else {
-        daywiseMap[date] = [iterator];
+  titleCell.font = { bold: true, size: 14, color: { argb: "FFFFFF" } };
+  titleCell.alignment = { horizontal: "center", vertical: "middle" };
+  titleCell.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "00B050" },
+  };
+  titleCell.border = {
+    top: { style: "thin" },
+    left: { style: "thin" },
+    bottom: { style: "thin" },
+    right: { style: "thin" },
+  };
+
+  // --- HEADER ROW 2: Month/Location/Cleaner info ---
+  if (isWorkerSelected) {
+    reportSheet.mergeCells(2, 1, 2, Math.ceil(totalCols / 3));
+    const monthCell = reportSheet.getCell("A2");
+    monthCell.value = `Month & Year: ${monthName.toUpperCase()} ${year}`;
+    monthCell.font = { bold: true, size: 10 };
+    monthCell.alignment = { horizontal: "center", vertical: "middle" };
+    monthCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "D9D9D9" },
+    };
+
+    const midCol = Math.ceil(totalCols / 3) + 1;
+    const endCol = Math.ceil((totalCols * 2) / 3);
+    reportSheet.mergeCells(2, midCol, 2, endCol);
+    const locationCell = reportSheet.getCell(2, midCol);
+    locationCell.value = `LOCATION: ${locationName}`;
+    locationCell.font = { bold: true, size: 10 };
+    locationCell.alignment = { horizontal: "center", vertical: "middle" };
+    locationCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "D9D9D9" },
+    };
+
+    reportSheet.mergeCells(2, endCol + 1, 2, totalCols);
+    const cleanerCell = reportSheet.getCell(2, endCol + 1);
+    cleanerCell.value = `CLEANER'S NAME: ${selectedWorkerName}`;
+    cleanerCell.font = { bold: true, size: 10 };
+    cleanerCell.alignment = { horizontal: "center", vertical: "middle" };
+    cleanerCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "D9D9D9" },
+    };
+  } else {
+    reportSheet.mergeCells(2, 1, 2, totalCols);
+    const subtitleCell = reportSheet.getCell("A2");
+    subtitleCell.value = `${monthName.toUpperCase()} ${year} - RESIDENCE LOCATIONS ONLY`;
+    subtitleCell.font = { bold: true, size: 11 };
+    subtitleCell.alignment = { horizontal: "center", vertical: "middle" };
+    subtitleCell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "D9D9D9" },
+    };
+  }
+
+  // --- ROW 3: Column Headers (Added TIPS) ---
+  let headerRow1;
+  if (isWorkerSelected) {
+    headerRow1 = reportSheet.addRow([
+      "S.N O",
+      "PARKING NO",
+      "CAR NO.",
+      "DATE OF START",
+      "CLEANING",
+      ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+      "Total",
+      "Tips", // ✅ Added Tips Header
+      "DU DATE",
+    ]);
+  } else {
+    headerRow1 = reportSheet.addRow([
+      "Sl. No",
+      "Name",
+      ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+      "Total",
+      "Tips", // ✅ Added Tips Header
+    ]);
+  }
+
+  headerRow1.eachCell((cell, colNumber) => {
+    cell.font = { bold: true, size: 10, color: { argb: "FFFFFF" } };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "1F4E78" },
+    };
+    cell.alignment = {
+      horizontal: "center",
+      vertical: "middle",
+      wrapText: true,
+    };
+    cell.border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+
+    const dayColumnStart = isWorkerSelected ? 5 : 2;
+    if (
+      colNumber > dayColumnStart &&
+      colNumber <= dayColumnStart + daysInMonth
+    ) {
+      const dayIndex = colNumber - dayColumnStart - 1;
+      const date = moment(findQuery.assignedDate.$gte).add(dayIndex, "days");
+      if (date.day() === 0) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF00" },
+        };
+        cell.font = { bold: true, size: 10, color: { argb: "000000" } };
       }
     }
+  });
 
-    for (const day of days) {
-      let data = daywiseMap[day] || [];
-      daywiseCounts[day] = data.length;
-      totalCars += data.length;
+  // --- ROW 4: Day Names ---
+  let dayNamesRow;
+  if (isWorkerSelected) {
+    dayNamesRow = reportSheet.addRow([
+      "",
+      "",
+      "",
+      "",
+      "",
+      ...Array.from({ length: daysInMonth }, (_, i) => {
+        const date = moment(findQuery.assignedDate.$gte).add(i, "days");
+        return date.format("ddd").substring(0, 2);
+      }),
+      "",
+      "",
+      "",
+    ]);
+  } else {
+    dayNamesRow = reportSheet.addRow([
+      "",
+      "",
+      ...Array.from({ length: daysInMonth }, (_, i) => {
+        const date = moment(findQuery.assignedDate.$gte).add(i, "days");
+        return date.format("ddd").substring(0, 2);
+      }),
+      "",
+      "",
+    ]);
+  }
+
+  dayNamesRow.eachCell((cell, colNumber) => {
+    cell.font = { bold: true, size: 8 };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+
+    const dayColumnStart = isWorkerSelected ? 5 : 2;
+    if (
+      colNumber > dayColumnStart &&
+      colNumber <= dayColumnStart + daysInMonth
+    ) {
+      const dayIndex = colNumber - dayColumnStart - 1;
+      const date = moment(findQuery.assignedDate.$gte).add(dayIndex, "days");
+      if (date.day() === 0) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF00" },
+        };
+      }
+    }
+  });
+
+  // --- DATA ROWS ---
+  let rowNumber = 1;
+  let dataSource;
+
+  if (isWorkerSelected) {
+    // We already calculated the carMap above for JSON, we can regenerate or reuse.
+    // Regenerating for clean Excel logic scope:
+    const carMapExcel = new Map();
+    data.forEach((job) => {
+      let vehicleInfo = null;
+      if (job.customer && job.customer.vehicles && job.vehicle) {
+        vehicleInfo = job.customer.vehicles.find(
+          (v) => v._id.toString() === job.vehicle.toString(),
+        );
+      }
+      const carKey = job.vehicle
+        ? job.vehicle.toString()
+        : `unknown_${job._id}`;
+      const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
+
+      if (!carMapExcel.has(carKey)) {
+        carMapExcel.set(carKey, {
+          parkingNo: vehicleInfo?.parking_no || "",
+          carNumber: vehicleInfo?.registration_no || "",
+          dateOfStart: moment(job.assignedDate).format("DD-MMM"),
+          cleaning: job.immediate ? "D" : "W3",
+          dailyMarks: Array(daysInMonth).fill(0),
+          amount: job.price || 0,
+          duDate: moment(job.completedDate || job.assignedDate).format(
+            "DD-MMM",
+          ),
+          tips: 0,
+        });
+      }
+      const carData = carMapExcel.get(carKey);
+      carData.tips += Number(job.tips) || 0; // Sum tips
+      if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth)
+        carData.dailyMarks[dayOfMonth - 1]++;
+    });
+    dataSource = Array.from(carMapExcel.values());
+  } else {
+    dataSource = workerSummaries; // We can reuse this from JSON calculation earlier
+  }
+
+  for (const item of dataSource) {
+    let rowData;
+    if (isWorkerSelected) {
+      // Calculate row total for car
+      const rowTotal = item.dailyMarks.reduce((a, b) => a + b, 0);
+      rowData = [
+        rowNumber,
+        item.parkingNo,
+        item.carNumber,
+        item.dateOfStart,
+        item.cleaning,
+        ...item.dailyMarks.map((count) => (count > 0 ? count : "")),
+        rowTotal,
+        item.tips, // ✅ Added Tips
+        item.duDate,
+      ];
+    } else {
+      const rowTotal = item.dailyCounts.reduce((a, b) => a + b, 0);
+      rowData = [
+        rowNumber,
+        item.name,
+        ...item.dailyCounts.map((count) => (count > 0 ? count : "")),
+        rowTotal,
+        item.tips, // ✅ Added Tips
+      ];
     }
 
-    reportSheet.addRow([
-      count++,
-      workerData[0].worker.name.trim(),
-      ...Object.values(daywiseCounts),
-      totalCars,
+    const dataRow = reportSheet.addRow(rowData);
+    rowNumber++;
+
+    dataRow.eachCell((cell, colNumber) => {
+      cell.border = {
+        top: { style: "thin" },
+        left: { style: "thin" },
+        bottom: { style: "thin" },
+        right: { style: "thin" },
+      };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.font = { size: 9 };
+
+      if (
+        (!isWorkerSelected && colNumber === 2) ||
+        (isWorkerSelected && colNumber === 2)
+      ) {
+        cell.alignment = { horizontal: "left", vertical: "middle" };
+      }
+
+      const dayColumnStart = isWorkerSelected ? 5 : 2;
+      if (
+        colNumber > dayColumnStart &&
+        colNumber <= dayColumnStart + daysInMonth
+      ) {
+        const dayIndex = colNumber - dayColumnStart - 1;
+        const date = moment(findQuery.assignedDate.$gte).add(dayIndex, "days");
+        if (date.day() === 0) {
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFFF00" },
+          };
+        }
+      }
+    });
+  }
+
+  // --- SUMMARY ROW ---
+  const dayCounts = new Array(daysInMonth).fill(0);
+  let totalAllTips = 0;
+  let totalAllCars = 0;
+
+  if (isWorkerSelected) {
+    data.forEach((job) => {
+      const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
+      if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth)
+        dayCounts[dayOfMonth - 1]++;
+      totalAllTips += Number(job.tips) || 0;
+      totalAllCars++;
+    });
+  } else {
+    workerSummaries.forEach((worker) => {
+      worker.dailyCounts.forEach((count, dayIndex) => {
+        dayCounts[dayIndex] += count;
+      });
+      totalAllTips += worker.tips;
+      totalAllCars += worker.dailyCounts.reduce((a, b) => a + b, 0);
+    });
+  }
+
+  let summaryRow;
+  if (isWorkerSelected) {
+    summaryRow = reportSheet.addRow([
+      "",
+      "Total Cleaned Cars",
+      "",
+      "",
+      "",
+      ...dayCounts,
+      totalAllCars,
+      totalAllTips, // ✅ Total Tips
+      "",
     ]);
+  } else {
+    summaryRow = reportSheet.addRow([
+      "",
+      "Total Cleaned Cars",
+      ...dayCounts,
+      totalAllCars,
+      totalAllTips, // ✅ Total Tips
+    ]);
+  }
+
+  summaryRow.eachCell((cell, colNumber) => {
+    cell.border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+    cell.font = { bold: true, size: 10 };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "D3D3D3" },
+    };
+    if (colNumber === 2)
+      cell.alignment = { horizontal: "left", vertical: "middle" };
+
+    const dayColumnStart = isWorkerSelected ? 5 : 2;
+    if (
+      colNumber > dayColumnStart &&
+      colNumber <= dayColumnStart + daysInMonth
+    ) {
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      const dayIndex = colNumber - dayColumnStart - 1;
+      const date = moment(findQuery.assignedDate.$gte).add(dayIndex, "days");
+      if (date.day() === 0) {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFFF00" },
+        };
+      }
+    }
+  });
+
+  // Set column widths
+  if (isWorkerSelected) {
+    reportSheet.getColumn(1).width = 6;
+    reportSheet.getColumn(2).width = 12;
+    reportSheet.getColumn(3).width = 15;
+    reportSheet.getColumn(4).width = 12;
+    reportSheet.getColumn(5).width = 10;
+    for (let i = 6; i <= 5 + daysInMonth; i++) {
+      reportSheet.getColumn(i).width = 3.5;
+    }
+    reportSheet.getColumn(6 + daysInMonth).width = 10;
+    reportSheet.getColumn(7 + daysInMonth).width = 10;
+    reportSheet.getColumn(8 + daysInMonth).width = 10; // DU Date
+  } else {
+    reportSheet.getColumn(1).width = 8;
+    reportSheet.getColumn(2).width = 20;
+    for (let i = 3; i <= 2 + daysInMonth; i++) {
+      reportSheet.getColumn(i).width = 4;
+    }
+    reportSheet.getColumn(3 + daysInMonth).width = 10; // Total
+    reportSheet.getColumn(4 + daysInMonth).width = 10; // Tips
   }
 
   return workbook;
