@@ -552,32 +552,28 @@ service.exportData = async (userInfo, query) => {
 };
 
 // ✅ UPDATED MONTHLY STATEMENT (PDF Fix)
+// ✅ UPDATED MONTHLY COLLECTION SHEET (Matches 17-Field Requirement)
 service.monthlyStatement = async (userInfo, query) => {
+  // 1. Setup Date Range (Postpaid Cycle)
+  // If user selects "January", we look for bills generated in January
+  const startOfMonth = moment(new Date(query.year, query.month, 1))
+    .startOf("month")
+    .utc()
+    .format();
+  const endOfMonth = moment(new Date(query.year, query.month, 1))
+    .endOf("month")
+    .utc()
+    .format();
+
   const findQuery = {
     isDeleted: false,
-    onewash: query.service_type === "onewash", // Dynamic check
-    // Exclude empty strings to protect find()
+    onewash: query.service_type === "onewash",
     building: { $ne: "" },
     worker: { $ne: "" },
-    createdAt: {
-      $gte: moment(new Date(query.year, query.month, 1))
-        .startOf("month")
-        .subtract(1, "day")
-        .utc()
-        .format(),
-      $lte: moment(new Date(query.year, query.month, 1))
-        .endOf("month")
-        .utc()
-        .format(),
-    },
+    createdAt: { $gte: startOfMonth, $lte: endOfMonth },
   };
 
-  // Optional Status Filter
-  if (query.status && query.status !== "all") {
-    findQuery.status = query.status;
-  }
-
-  // Apply filters only if valid IDs
+  // 2. Apply Filters
   if (isValidId(query.worker)) {
     findQuery.worker = query.worker;
   } else if (isValidId(query.building)) {
@@ -588,185 +584,149 @@ service.monthlyStatement = async (userInfo, query) => {
     findQuery.worker = { $in: workers.map((e) => e._id) };
   }
 
-  // 1. Fetch Raw Data
-  let data = await PaymentsModel.find(findQuery).sort({ _id: -1 }).lean();
+  // 3. Fetch Data
+  let data = await PaymentsModel.find(findQuery)
+    // .sort({ "vehicle.parking_no": 1 }) // Use this if parking_no is at root, otherwise sort in JS
+    .lean();
 
-  // 2. Filter Bad Data in JS
-  data = data.filter((item) => {
-    const validBuilding =
-      item.building === null ||
-      item.building === undefined ||
-      isValidId(item.building);
-    const validWorker =
-      item.worker === null ||
-      item.worker === undefined ||
-      isValidId(item.worker);
-    return validBuilding && validWorker;
-  });
-
-  // 3. Safe Populate
+  // 4. Populate
   try {
     data = await PaymentsModel.populate(data, [
       { path: "job", model: "jobs" },
-      { path: "worker", model: "workers" },
-      { path: "building", model: "buildings" },
+      { path: "worker", model: "workers", select: "name" },
+      { path: "building", model: "buildings", select: "name" },
       { path: "customer", model: "customers" },
     ]);
-  } catch (e) {
-    console.error("Monthly Populate Warning:", e.message);
+  } catch (err) {
+    console.error("Populate Warning:", err.message);
   }
 
-  // --- JSON RESPONSE (For Rich PDF) ---
-  if (query.format === "json") {
-    const result = [];
-    const buildingsMap = {};
-
-    for (const item of data) {
-      if (!item.building || !item.worker) continue;
-
-      const bId = item.building._id.toString();
-      if (!buildingsMap[bId]) {
-        buildingsMap[bId] = {
-          buildingName: item.building.name,
-          workers: {},
-        };
-      }
-
-      const wId = item.worker._id.toString();
-      if (!buildingsMap[bId].workers[wId]) {
-        buildingsMap[bId].workers[wId] = {
-          workerName: item.worker.name,
-          payments: [],
-        };
-      }
-
-      let vehicle = null;
-      if (item.customer && item.customer.vehicles) {
-        vehicle = item.customer.vehicles.find(
-          (e) => e.registration_no == item.vehicle.registration_no,
-        );
-      }
-
-      buildingsMap[bId].workers[wId].payments.push({
-        parkingNo: item.vehicle?.parking_no || "-",
-        regNo: item.vehicle?.registration_no || "-",
-        mobile: item.customer?.mobile || "-",
-        flatNo: item.customer?.flat_no || "-",
-        startDate: vehicle
-          ? moment(vehicle.start_date).format("DD-MM-YYYY")
-          : "",
-        schedule: vehicle
-          ? vehicle.schedule_type == "daily"
-            ? "D"
-            : `W${vehicle.schedule_days?.length || 0}`
-          : "",
-        advance: vehicle && vehicle.advance_amount ? "A" : "",
-        currentMonth: item.amount_charged || 0,
-        lastMonth: item.old_balance || 0,
-        totalDue: item.total_amount || 0,
-        paid: item.amount_paid || 0,
-        notes: item.notes || "",
-        dueDate: moment(item.createdAt).add(1, "month").format("DD-MM-YYYY"),
-      });
+  // 5. Helper to Format Data into 17 Fields
+  const formatRecord = (item, index) => {
+    let vehicle = null;
+    // Try to find vehicle details in customer array matches
+    if (item.customer && item.customer.vehicles) {
+      // Assuming item.vehicle stores registration_no or object with it
+      const regNo = item.vehicle?.registration_no || item.vehicle;
+      vehicle = item.customer.vehicles.find((v) => v.registration_no === regNo);
     }
 
-    Object.keys(buildingsMap).forEach((bId) => {
-      const building = buildingsMap[bId];
-      const workersArray = Object.values(building.workers);
-      result.push({
-        buildingName: building.buildingName,
-        workers: workersArray,
+    // Calculation Logic
+    const subscriptionAmount = item.amount_charged || 0; // Current Month Charge
+    const prevDue = item.old_balance || 0; // Previous Pending Due
+    const totalDue = item.total_amount || 0; // Total Amount Due
+    const paid = item.amount_paid || 0; // Paid Amount
+    const balance = totalDue - paid; // Balance Amount
+
+    // 17 Fields Mapping
+    return {
+      slNo: index + 1, // 1. Serial Number
+      parkingNo: item.vehicle?.parking_no || "-", // 2. Parking Number
+      carNo: item.vehicle?.registration_no || "-", // 3. Car Number
+      mobile: item.customer?.mobile || "No Mobile", // 4. Mobile Number
+      flatNo: item.customer?.flat_no || "-", // 5. Flat Number
+      startDate: vehicle
+        ? moment(vehicle.start_date).format("DD-MM-YYYY")
+        : "-", // 6. Start Date
+      schedule: vehicle
+        ? vehicle.schedule_type === "daily"
+          ? "Daily"
+          : `Weekly (${vehicle.schedule_days?.length || 0})`
+        : "-", // 7. Weekly Schedule
+      advance: vehicle?.advance_amount ? "Yes" : "No", // 8. Advance Payment Option
+      subAmount: subscriptionAmount, // 9. Subscription Amount
+      prevDue: prevDue, // 10. Previous Payment Due
+      totalDue: totalDue, // 11. Total Amount Due
+      paid: paid, // 12. Paid Amount
+      balance: balance, // 13. Balance Amount
+      payDate: item.collectedDate
+        ? moment(item.collectedDate).format("DD-MM-YYYY")
+        : "-", // 14. Payment Date
+      receipt: item.receipt_no || item._id.toString().slice(-6).toUpperCase(), // 15. Receipt Number (System Gen)
+      dueDate: moment(item.createdAt).endOf("month").format("DD-MM-YYYY"), // 16. Payment Due Date (End of billing month)
+      remarks: item.notes || "-", // 17. Remarks
+
+      // Extra metadata for Grouping
+      buildingName: item.building?.name || "Unknown Building",
+      workerName: item.worker?.name || "Unassigned",
+    };
+  };
+
+  // --- A. JSON RESPONSE (For Frontend PDF Generation) ---
+  if (query.format === "json") {
+    // Group by Building -> Worker
+    const result = [];
+    const grouped = {};
+
+    data.forEach((item, index) => {
+      const formatted = formatRecord(item, index);
+      const bKey = formatted.buildingName;
+      const wKey = formatted.workerName;
+
+      if (!grouped[bKey]) grouped[bKey] = {};
+      if (!grouped[bKey][wKey]) grouped[bKey][wKey] = [];
+
+      grouped[bKey][wKey].push(formatted);
+    });
+
+    Object.keys(grouped).forEach((bName) => {
+      const workers = [];
+      Object.keys(grouped[bName]).forEach((wName) => {
+        workers.push({
+          workerName: wName,
+          payments: grouped[bName][wName],
+        });
       });
+      result.push({ buildingName: bName, workers: workers });
     });
 
     return result;
   }
 
-  // --- EXCEL RESPONSE (Standard) ---
+  // --- B. EXCEL RESPONSE (Standard Download) ---
   const workbook = new exceljs.Workbook();
-  const buildingsMap = {};
-  const buildingWorkerMap = {};
+  const sheet = workbook.addWorksheet("Collection Sheet");
 
-  for (const iterator of JSON.parse(JSON.stringify(data))) {
-    if (iterator.building && iterator.worker) {
-      if (buildingWorkerMap[iterator.building._id]) {
-        if (buildingWorkerMap[iterator.building._id][iterator.worker._id]) {
-          buildingWorkerMap[iterator.building._id][iterator.worker._id].push(
-            iterator,
-          );
-        } else {
-          buildingWorkerMap[iterator.building._id][iterator.worker._id] = [
-            iterator,
-          ];
-        }
-      } else {
-        buildingsMap[iterator.building._id] = iterator.building;
-        buildingWorkerMap[iterator.building._id] = {
-          [iterator.worker._id]: [iterator],
-        };
-      }
-    }
-  }
-
-  const keys = [
-    "Sl. No",
-    "Parking No.",
-    "Registration No.",
-    "Mobile No.",
-    "Flat No.",
-    "Start Date",
-    "Schedule",
-    "Advance",
-    "Current Month",
-    "Last Month",
-    "Total",
-    "Paid",
-    "Notes",
-    "Due Date",
+  // 1. Define Columns (17 Required Fields)
+  sheet.columns = [
+    { header: "Serial Number", key: "slNo", width: 8 },
+    { header: "Parking Number", key: "parkingNo", width: 15 },
+    { header: "Car Number", key: "carNo", width: 15 },
+    { header: "Mobile Number", key: "mobile", width: 15 },
+    { header: "Flat Number", key: "flatNo", width: 12 },
+    { header: "Cust. Start Date", key: "startDate", width: 15 },
+    { header: "Weekly Schedule", key: "schedule", width: 15 },
+    { header: "Adv. Pay Option", key: "advance", width: 12 },
+    { header: "Subscript. Amount", key: "subAmount", width: 15 },
+    { header: "Prev. Payment Due", key: "prevDue", width: 15 },
+    { header: "Total Amount Due", key: "totalDue", width: 15 },
+    { header: "Paid Amount", key: "paid", width: 15 },
+    { header: "Balance Amount", key: "balance", width: 15 },
+    { header: "Payment Date", key: "payDate", width: 15 },
+    { header: "Receipt Number", key: "receipt", width: 15 },
+    { header: "Payment Due Date", key: "dueDate", width: 15 },
+    { header: "Remarks", key: "remarks", width: 20 },
   ];
 
-  for (const building in buildingWorkerMap) {
-    let count = 1;
-    const buildingInfo = buildingsMap[building];
-    const workersData = buildingWorkerMap[building];
-    const reportSheet = workbook.addWorksheet(buildingInfo.name);
+  // Style Header
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  headerRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF1F4E78" },
+  };
+  headerRow.alignment = {
+    horizontal: "center",
+    vertical: "middle",
+    wrapText: true,
+  };
+  sheet.getRow(1).height = 30;
 
-    for (const worker in workersData) {
-      const workerData = workersData[worker];
-      reportSheet.addRow([workerData[0].worker.name, buildingInfo.name]);
-      reportSheet.addRow(keys);
-
-      for (const payment of workerData) {
-        let vehicle = null;
-        if (payment.customer && payment.customer.vehicles) {
-          vehicle = payment.customer.vehicles.find(
-            (v) => v.registration_no == payment.vehicle.registration_no,
-          );
-        }
-
-        reportSheet.addRow([
-          count++,
-          payment.vehicle.parking_no,
-          payment.vehicle.registration_no,
-          payment.customer?.mobile || "-",
-          payment.customer?.flat_no || "-",
-          vehicle ? moment(vehicle.start_date).format("DD-MM-YYYY") : "",
-          vehicle
-            ? vehicle.schedule_type == "daily"
-              ? "D"
-              : `W${vehicle.schedule_days.length}`
-            : "",
-          vehicle ? (vehicle.advance_amount ? "A" : "") : "",
-          payment.amount_charged,
-          payment.old_balance,
-          payment.total_amount - payment.amount_paid, // Balance/Total
-          payment.amount_paid,
-          payment.notes,
-          moment(payment.createdAt).add(1, "month").format("DD-MM-YYYY"),
-        ]);
-      }
-    }
-  }
+  // Add Data
+  data.forEach((item, index) => {
+    sheet.addRow(formatRecord(item, index));
+  });
 
   return workbook;
 };
@@ -844,228 +804,182 @@ service.bulkUpdateStatus = async (userInfo, payload) => {
 
 const isValidId = (id) => {
   if (!id) return false;
-  // Check if it's a valid 24-char hex string
   return typeof id === "string"
     ? /^[0-9a-fA-F]{24}$/.test(id)
     : mongoose.Types.ObjectId.isValid(id);
 };
+// ✅ UPDATED MONTHLY STATEMENT (View + Excel + PDF Support)
 service.monthlyStatement = async (userInfo, query) => {
-  // 1. Setup Query
+  console.log("🔵 [BACKEND] monthlyStatement started");
+  console.log("👉 Filters Received:", JSON.stringify(query, null, 2));
+
+  // 1. Setup Date Range
+  const startOfMonth = moment(new Date(query.year, query.month, 1))
+    .startOf("month")
+    .utc()
+    .format();
+  const endOfMonth = moment(new Date(query.year, query.month, 1))
+    .endOf("month")
+    .utc()
+    .format();
+
   const findQuery = {
     isDeleted: false,
-    // Fix: Dynamic service type check
     onewash: query.service_type === "onewash",
-
-    // Date Range
-    createdAt: {
-      $gte: moment(new Date(query.year, query.month, 1))
-        .startOf("month")
-        .subtract(1, "day") // Safety buffer
-        .utc()
-        .format(),
-      $lte: moment(new Date(query.year, query.month, 1))
-        .endOf("month")
-        .utc()
-        .format(),
-    },
+    createdAt: { $gte: startOfMonth, $lte: endOfMonth },
   };
 
-  // 2. Apply Filters (Only if Valid IDs)
+  // 2. Apply Filters (Strict)
   if (isValidId(query.worker)) {
     findQuery.worker = query.worker;
-  } else if (isValidId(query.building)) {
-    const workers = await WorkersModel.find(
-      { isDeleted: false, buildings: query.building },
-      { _id: 1 },
-    ).lean();
-    findQuery.worker = { $in: workers.map((e) => e._id) };
   }
 
-  // 3. Fetch Raw Data (Without Populate yet to avoid Crash)
-  let data = await PaymentsModel.find(findQuery, {
-    id: 0,
-    status: 0,
-    isDeleted: 0,
-    createdBy: 0,
-    updatedBy: 0,
-    updatedAt: 0,
-  })
-    .sort({ _id: -1 })
+  if (isValidId(query.building)) {
+    // Direct filtering if Payment has building field (Preferred)
+    findQuery.building = query.building;
+  }
+
+  console.log("🔍 [BACKEND] Mongo Query:", JSON.stringify(findQuery, null, 2));
+
+  // 3. Fetch Data
+  let data = await PaymentsModel.find(findQuery)
+    .sort({ "vehicle.parking_no": 1 })
     .lean();
 
-  // 4. ✅ CRITICAL FIX: Filter out bad data (empty strings) in JS
-  // This prevents the "Cast to ObjectId failed" error
-  data = data.filter(
-    (item) => isValidId(item.building) && isValidId(item.worker),
-  );
+  console.log(`📦 [BACKEND] Records Found: ${data.length}`);
 
-  // 5. Safe Populate (Now that data is clean)
+  // 4. Populate References
   try {
     data = await PaymentsModel.populate(data, [
       { path: "job", model: "jobs" },
-      { path: "worker", model: "workers" },
-      { path: "building", model: "buildings" },
+      { path: "worker", model: "workers", select: "name" },
+      { path: "building", model: "buildings", select: "name" },
       { path: "customer", model: "customers" },
     ]);
   } catch (err) {
-    console.error("Populate Warning:", err.message);
-    // If populate fails, continue with partial data rather than crashing request
+    console.error("⚠️ [BACKEND] Populate Warning:", err.message);
   }
 
-  // --- RETURN JSON (For Rich PDF) ---
-  if (query.format === "json") {
-    const result = [];
-    const buildingsMap = {};
-
-    for (const item of data) {
-      if (!item.building || !item.worker) continue;
-
-      const bId = item.building._id.toString();
-      if (!buildingsMap[bId]) {
-        buildingsMap[bId] = {
-          buildingName: item.building.name,
-          workers: {},
-        };
-      }
-
-      const wId = item.worker._id.toString();
-      if (!buildingsMap[bId].workers[wId]) {
-        buildingsMap[bId].workers[wId] = {
-          workerName: item.worker.name,
-          payments: [],
-        };
-      }
-
-      let vehicle = null;
-      if (item.customer && item.customer.vehicles) {
-        vehicle = item.customer.vehicles.find(
-          (e) => e.registration_no == item.vehicle.registration_no,
-        );
-      }
-
-      buildingsMap[bId].workers[wId].payments.push({
-        parkingNo: item.vehicle?.parking_no || "-",
-        regNo: item.vehicle?.registration_no || "-",
-        mobile: item.customer?.mobile || "-",
-        flatNo: item.customer?.flat_no || "-",
-        startDate: vehicle
-          ? moment(vehicle.start_date).format("DD-MM-YYYY")
-          : "",
-        schedule: vehicle
-          ? vehicle.schedule_type == "daily"
-            ? "D"
-            : `W${vehicle.schedule_days?.length || 0}`
-          : "",
-        advance: vehicle && vehicle.advance_amount ? "A" : "",
-        currentMonth: item.amount_charged || 0,
-        lastMonth: item.old_balance || 0,
-        totalDue: item.total_amount || 0,
-        paid: item.amount_paid || 0,
-        notes: item.notes || "",
-        dueDate: moment(item.createdAt).add(1, "month").format("DD-MM-YYYY"),
-      });
+  // 5. Helper to Format Data (17 Fields)
+  const formatRecord = (item, index) => {
+    let vehicle = null;
+    if (item.customer && item.customer.vehicles) {
+      const regNo = item.vehicle?.registration_no || item.vehicle;
+      vehicle = item.customer.vehicles.find((v) => v.registration_no === regNo);
     }
 
-    Object.keys(buildingsMap).forEach((bId) => {
-      const building = buildingsMap[bId];
-      const workersArray = Object.values(building.workers);
-      result.push({
-        buildingName: building.buildingName,
-        workers: workersArray,
-      });
+    const subscriptionAmount = item.amount_charged || 0;
+    const prevDue = item.old_balance || 0;
+    const totalDue = item.total_amount || 0;
+    const paid = item.amount_paid || 0;
+    const balance = totalDue - paid;
+
+    return {
+      slNo: index + 1,
+      parkingNo: item.vehicle?.parking_no || "-",
+      carNo: item.vehicle?.registration_no || "-",
+      mobile: item.customer?.mobile || "No Mobile",
+      flatNo: item.customer?.flat_no || "-",
+      startDate: vehicle
+        ? moment(vehicle.start_date).format("DD-MM-YYYY")
+        : "-",
+      schedule: vehicle
+        ? vehicle.schedule_type === "daily"
+          ? "Daily"
+          : `Weekly (${vehicle.schedule_days?.length || 0})`
+        : "-",
+      advance: vehicle?.advance_amount ? "Yes" : "No",
+      subAmount: subscriptionAmount,
+      prevDue: prevDue,
+      totalDue: totalDue,
+      paid: paid,
+      balance: balance,
+      payDate: item.collectedDate
+        ? moment(item.collectedDate).format("DD-MM-YYYY")
+        : "-",
+      receipt: item.receipt_no || item._id.toString().slice(-6).toUpperCase(),
+      dueDate: moment(item.createdAt).endOf("month").format("DD-MM-YYYY"),
+      remarks: item.notes || "-",
+
+      // Metadata
+      buildingName: item.building?.name || "Unknown Building",
+      workerName: item.worker?.name || "Unassigned",
+    };
+  };
+
+  // --- A. JSON RESPONSE (View & PDF) ---
+  if (query.format === "json") {
+    const result = [];
+    const grouped = {};
+
+    data.forEach((item, index) => {
+      const formatted = formatRecord(item, index);
+      const bKey = formatted.buildingName;
+      const wKey = formatted.workerName;
+
+      if (!grouped[bKey]) grouped[bKey] = {};
+      if (!grouped[bKey][wKey]) grouped[bKey][wKey] = [];
+
+      grouped[bKey][wKey].push(formatted);
     });
 
+    Object.keys(grouped).forEach((bName) => {
+      const workers = [];
+      Object.keys(grouped[bName]).forEach((wName) => {
+        workers.push({
+          workerName: wName,
+          payments: grouped[bName][wName],
+        });
+      });
+      result.push({ buildingName: bName, workers: workers });
+    });
+
+    console.log("✅ [BACKEND] Sending JSON Response");
     return result;
   }
 
-  // --- RETURN EXCEL WORKBOOK (For Excel Export) ---
+  // --- B. EXCEL RESPONSE (Download) ---
+  console.log("✅ [BACKEND] Generating Excel Workbook");
   const workbook = new exceljs.Workbook();
-  const buildingsMap = {};
-  const buildingWorkerMap = {};
+  const sheet = workbook.addWorksheet("Collection Sheet");
 
-  for (const iterator of JSON.parse(JSON.stringify(data))) {
-    if (iterator.building && iterator.worker) {
-      if (buildingWorkerMap[iterator.building._id]) {
-        if (buildingWorkerMap[iterator.building._id][iterator.worker._id]) {
-          buildingWorkerMap[iterator.building._id][iterator.worker._id].push(
-            iterator,
-          );
-        } else {
-          buildingWorkerMap[iterator.building._id][iterator.worker._id] = [
-            iterator,
-          ];
-        }
-      } else {
-        buildingsMap[iterator.building._id] = iterator.building;
-        buildingWorkerMap[iterator.building._id] = {
-          [iterator.worker._id]: [iterator],
-        };
-      }
-    }
-  }
-
-  const keys = [
-    "Sl. No",
-    "Parking No.",
-    "Registration No.",
-    "Mobile No.",
-    "Flat No.",
-    "Start Date",
-    "Schedule",
-    "Advance",
-    "Current Month",
-    "Last Month",
-    "Total",
-    "Paid",
-    "Notes",
-    "Due Date",
+  sheet.columns = [
+    { header: "Serial Number", key: "slNo", width: 8 },
+    { header: "Parking Number", key: "parkingNo", width: 15 },
+    { header: "Car Number", key: "carNo", width: 15 },
+    { header: "Mobile Number", key: "mobile", width: 15 },
+    { header: "Flat Number", key: "flatNo", width: 12 },
+    { header: "Cust. Start Date", key: "startDate", width: 15 },
+    { header: "Weekly Schedule", key: "schedule", width: 15 },
+    { header: "Adv. Pay Option", key: "advance", width: 12 },
+    { header: "Subscript. Amount", key: "subAmount", width: 15 },
+    { header: "Prev. Payment Due", key: "prevDue", width: 15 },
+    { header: "Total Amount Due", key: "totalDue", width: 15 },
+    { header: "Paid Amount", key: "paid", width: 15 },
+    { header: "Balance Amount", key: "balance", width: 15 },
+    { header: "Payment Date", key: "payDate", width: 15 },
+    { header: "Receipt Number", key: "receipt", width: 15 },
+    { header: "Payment Due Date", key: "dueDate", width: 15 },
+    { header: "Remarks", key: "remarks", width: 20 },
   ];
 
-  for (const building in buildingWorkerMap) {
-    let count = 1;
-    const buildingInfo = buildingsMap[building];
-    const workersData = buildingWorkerMap[building];
-    const reportSheet = workbook.addWorksheet(buildingInfo.name);
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  headerRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF1F4E78" },
+  };
+  headerRow.alignment = {
+    horizontal: "center",
+    vertical: "middle",
+    wrapText: true,
+  };
+  sheet.getRow(1).height = 30;
 
-    for (const worker in workersData) {
-      const workerData = workersData[worker];
-      reportSheet.addRow([workerData[0].worker.name, buildingInfo.name]);
-      reportSheet.addRow(keys);
-
-      for (const payment of workerData) {
-        let vehicle = null;
-        if (payment.customer && payment.customer.vehicles) {
-          vehicle = payment.customer.vehicles.find(
-            (e) => e.registration_no == payment.vehicle.registration_no,
-          );
-        }
-
-        reportSheet.addRow([
-          count++,
-          payment.vehicle.parking_no,
-          payment.vehicle.registration_no,
-          payment.customer?.mobile || "-",
-          payment.customer?.flat_no || "-",
-          vehicle ? moment(vehicle.start_date).format("DD-MM-YYYY") : "",
-          vehicle
-            ? vehicle.schedule_type == "daily"
-              ? "D"
-              : `W${vehicle.schedule_days.length}`
-            : "",
-          vehicle ? (vehicle.advance_amount ? "A" : "") : "",
-          payment.amount_charged,
-          payment.old_balance,
-          payment.total_amount - payment.amount_paid,
-          payment.amount_paid,
-          payment.notes,
-          moment(payment.createdAt)
-            .tz("Asia/Dubai")
-            .add(1, "month")
-            .format("DD-MM-YYYY"),
-        ]);
-      }
-    }
-  }
+  data.forEach((item, index) => {
+    sheet.addRow(formatRecord(item, index));
+  });
 
   return workbook;
 };

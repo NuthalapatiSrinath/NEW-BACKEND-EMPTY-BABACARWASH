@@ -1,26 +1,34 @@
-'use strict'
+"use strict";
 
-const mongoose = require('mongoose');
-const schema = new mongoose.Schema({
+const mongoose = require("mongoose");
+const schema = new mongoose.Schema(
+  {
     id: { type: Number },
     scheduleId: { type: Number },
     assignedDate: { type: Date },
     completedDate: { type: Date },
-    customer: { type: String, ref: 'customers' },
-    worker: { type: String, ref: 'workers' },
+    customer: { type: String, ref: "customers" },
+    worker: { type: String, ref: "workers" },
     vehicle: { type: String },
-    location: { type: String, ref: 'locations' },
-    building: { type: String, ref: 'buildings' },
+    location: { type: String, ref: "locations" },
+    building: { type: String, ref: "buildings" },
     locationMap: { type: Object },
-    status: { type: String, default: 'pending' },
+    status: { type: String, default: "pending" },
+
+    // ✅ ADD THESE FIELDS
+    tips: { type: Number, default: 0 }, // Required for One Wash Tips report
+    price: { type: Number, default: 0 }, // Required for One Wash amount
+
     createdBy: { type: String },
     deletedBy: { type: String },
     immediate: { type: Boolean, default: false },
     isDeleted: { type: Boolean, default: false },
-}, {
+  },
+  {
     versionKey: false,
     strict: false,
-    timestamps: true
-});
+    timestamps: true,
+  },
+);
 
-module.exports = mongoose.model('jobs', schema);
+module.exports = mongoose.model("jobs", schema);

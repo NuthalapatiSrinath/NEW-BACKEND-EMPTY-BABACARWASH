@@ -1,19 +1,25 @@
-'use strict'
+"use strict";
 
-const mongoose = require('mongoose');
-const { ObjectId } = require('mongoose').Types;
+const mongoose = require("mongoose");
+const { ObjectId } = require("mongoose").Types;
 
-const schema = new mongoose.Schema({
+const schema = new mongoose.Schema(
+  {
     id: { type: Number },
     job: { type: ObjectId },
     status: { type: String, default: "pending" },
-    createdBy: { type: String, required: true, ref: 'users' },
-    worker: { type: String, ref: 'worker' },
-    customer: { type: String, ref: 'customers' },
+    createdBy: { type: String, required: true, ref: "users" },
+    worker: { type: String, ref: "worker" },
+    customer: { type: String, ref: "customers" },
     amount_charged: { type: Number, default: 0 },
     amount_paid: { type: Number, default: 0 },
     balance: { type: Number, default: 0 },
     old_balance: { type: Number, default: 0 },
+
+    // ✅ ADD THESE FIELDS
+    receipt_no: { type: String }, // Required for "Receipt Number" column
+    notes: { type: String }, // Required for "Remarks" column
+
     tip_amount: { type: Number, default: 0 },
     total_amount: { type: Number, default: 0 },
     settled: { type: String, default: "pending" },
@@ -23,10 +29,12 @@ const schema = new mongoose.Schema({
     updatedBy: { type: String },
     deletedBy: { type: String },
     isDeleted: { type: Boolean, default: false },
-}, {
+  },
+  {
     versionKey: false,
     strict: false,
-    timestamps: true
-});
+    timestamps: true,
+  },
+);
 
-module.exports = mongoose.model('payments', schema);
+module.exports = mongoose.model("payments", schema);
