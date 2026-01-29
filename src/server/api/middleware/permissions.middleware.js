@@ -28,7 +28,9 @@ exports.hasAccess = (moduleName, actionType) => {
         return next();
       }
 
-      return res.status(403).json({ message: "Access Denied: You do not have permission." });
+      return res
+        .status(403)
+        .json({ message: "Access Denied: You do not have permission." });
     } catch (err) {
       console.error("RBAC Error:", err);
       return res.status(500).json({ message: "Permission check failed." });
@@ -47,7 +49,9 @@ exports.requireReason = (req, res, next) => {
   // if (req.user.role === 'admin') return next();
 
   if (!reason || typeof reason !== "string" || reason.trim().length < 3) {
-    return res.status(400).json({ message: "A valid 'reason' is required for this action." });
+    return res
+      .status(400)
+      .json({ message: "A valid 'reason' is required for this action." });
   }
   next();
 };

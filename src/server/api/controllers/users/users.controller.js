@@ -1,7 +1,6 @@
-
 const csv = require("fast-csv");
 const service = require("./users.service");
-const controller = module.exports = {};
+const controller = (module.exports = {});
 
 // Set permissions for a user (admin only)
 controller.setPermissions = async (req, res) => {

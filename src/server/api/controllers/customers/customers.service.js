@@ -20,11 +20,18 @@ service.list = async (userInfo, query) => {
   const paginationData = CommonHelper.paginationData(query);
   const search = query.search ? query.search.trim() : "";
 
-  // Base Query
+  // Base Query - Filter by CUSTOMER status only, not vehicle status
   const findQuery = {
     isDeleted: false,
-    "vehicles.status": Number(query.status) || 1,
+    status: Number(query.status) || 1, // Filter by CUSTOMER status (1=active, 2=inactive)
   };
+
+  console.log(
+    "🔍 [CUSTOMER LIST] Filtering by customer status:",
+    query.status,
+    "Query:",
+    findQuery,
+  );
 
   if (search) {
     const searchRegex = { $regex: search, $options: "i" };
@@ -106,10 +113,8 @@ service.list = async (userInfo, query) => {
           vehicle.worker = worker || null;
         }
       }
-      // Filter vehicles based on active tab status
-      customer.vehicles = customer.vehicles.filter(
-        (v) => v.status === (Number(query.status) || 1),
-      );
+      // ✅ Don't filter vehicles by status - show all vehicles regardless of customer status
+      // Vehicle status is independent and managed separately
     }
   }
 
