@@ -4,6 +4,7 @@ const BuildingsModel = require("../../models/buildings.model");
 const MallsModel = require("../../models/malls.model");
 const WorkersModel = require("../../models/workers.model");
 const ImportLogsModel = require("../../models/import-logs.model");
+const PaymentsModel = require("../../models/payments.model");
 const CounterService = require("../../../utils/counters");
 const CommonHelper = require("../../../helpers/common.helper");
 const JobsService = require("../../staff/jobs/jobs.service");
@@ -118,6 +119,107 @@ service.list = async (userInfo, query) => {
     }
   }
 
+  // Add pending dues for each customer and vehicle - OPTIMIZED with bulk query
+  console.log(
+    "\n💰 [CUSTOMER LIST] Starting pending dues calculation for",
+    data.length,
+    "customers",
+  );
+
+  if (data.length > 0) {
+    const customerIds = data.map((c) => c._id);
+
+    // Single bulk query for all pending payments (payments already have vehicle info embedded)
+    const allPendingPayments = await PaymentsModel.find({
+      customer: { $in: customerIds },
+      isDeleted: false,
+      status: "pending",
+    }).lean();
+
+    console.log(
+      "📊 [CUSTOMER LIST] Found",
+      allPendingPayments.length,
+      "total pending payments",
+    );
+
+    // Group payments by vehicle (registration_no) and calculate dues
+    const vehicleDuesMap = {};
+    const customerDuesMap = {};
+
+    allPendingPayments.forEach((payment) => {
+      const customerId = payment.customer?.toString();
+      const registrationNo = payment.vehicle?.registration_no;
+
+      if (!registrationNo || !customerId) {
+        console.log("⚠️ [CUSTOMER LIST] Skipping payment - missing data:", {
+          paymentId: payment._id,
+          customerId,
+          registrationNo,
+          hasCustomer: !!payment.customer,
+          hasVehicle: !!payment.vehicle,
+        });
+        return;
+      }
+
+      const amountDue =
+        (payment.amount_charged || 0) - (payment.amount_paid || 0);
+
+      if (amountDue > 0) {
+        // Track vehicle-wise dues
+        const vehicleKey = `${customerId}_${registrationNo}`;
+        if (!vehicleDuesMap[vehicleKey]) {
+          vehicleDuesMap[vehicleKey] = { totalDue: 0, pendingCount: 0 };
+        }
+        vehicleDuesMap[vehicleKey].totalDue += amountDue;
+        vehicleDuesMap[vehicleKey].pendingCount += 1;
+
+        // Track customer-wise dues (sum of all vehicles)
+        if (!customerDuesMap[customerId]) {
+          customerDuesMap[customerId] = { totalDue: 0, pendingCount: 0 };
+        }
+        customerDuesMap[customerId].totalDue += amountDue;
+        customerDuesMap[customerId].pendingCount += 1;
+      }
+    });
+
+    console.log(
+      "💰 [CUSTOMER LIST] Vehicle dues map entries:",
+      Object.keys(vehicleDuesMap).length,
+      "- Sample:",
+      Object.entries(vehicleDuesMap).slice(0, 3),
+    );
+
+    // Assign dues to each vehicle and customer
+    data.forEach((customer) => {
+      const customerId = customer._id.toString();
+
+      // Assign customer-level dues
+      const customerDues = customerDuesMap[customerId] || {
+        totalDue: 0,
+        pendingCount: 0,
+      };
+      customer.pendingDues = customerDues.totalDue;
+      customer.pendingCount = customerDues.pendingCount;
+
+      // Assign vehicle-level dues
+      if (customer.vehicles && customer.vehicles.length > 0) {
+        customer.vehicles.forEach((vehicle) => {
+          const vehicleKey = `${customerId}_${vehicle.registration_no}`;
+          const vehicleDues = vehicleDuesMap[vehicleKey] || {
+            totalDue: 0,
+            pendingCount: 0,
+          };
+          vehicle.pendingDues = vehicleDues.totalDue;
+          vehicle.pendingCount = vehicleDues.pendingCount;
+        });
+      }
+    });
+
+    console.log(
+      "✅ [CUSTOMER LIST] Pending dues calculation complete (vehicle-wise, optimized bulk query)\n",
+    );
+  }
+
   return { total, data };
 };
 
@@ -144,15 +246,37 @@ service.create = async (userInfo, payload) => {
 };
 
 service.update = async (userInfo, id, payload) => {
-  const vehicle = payload.vehicles[0];
-  delete payload.vehicles;
-  await CustomersModel.updateOne({ _id: id }, { $set: payload });
-  await CustomersModel.updateOne(
-    { _id: id, "vehicles._id": vehicle._id },
-    { $set: { "vehicles.$": vehicle } },
-  );
-  const customerData = await CustomersModel.findOne({ _id: id }).lean();
-  await JobsService.createJob(customerData);
+  // If status is being changed to inactive (2), check for pending dues
+  if (payload.status === 2) {
+    const duesCheck = await service.checkPendingDues(id);
+
+    if (duesCheck.hasPendingDues) {
+      const error = new Error(
+        `PENDING_DUES: Customer has outstanding payment of AED ${duesCheck.totalDue.toFixed(2)} across ${duesCheck.pendingCount} transaction(s). Please clear all dues before deactivating.`,
+      );
+      error.code = "PENDING_DUES";
+      error.totalDue = duesCheck.totalDue;
+      error.pendingCount = duesCheck.pendingCount;
+      error.payments = duesCheck.payments;
+      throw error;
+    }
+  }
+
+  // If vehicles array exists, update vehicle info
+  if (payload.vehicles && payload.vehicles.length > 0) {
+    const vehicle = payload.vehicles[0];
+    delete payload.vehicles;
+    await CustomersModel.updateOne({ _id: id }, { $set: payload });
+    await CustomersModel.updateOne(
+      { _id: id, "vehicles._id": vehicle._id },
+      { $set: { "vehicles.$": vehicle } },
+    );
+    const customerData = await CustomersModel.findOne({ _id: id }).lean();
+    await JobsService.createJob(customerData);
+  } else {
+    // Just update customer fields (like status)
+    await CustomersModel.updateOne({ _id: id }, { $set: payload });
+  }
 };
 
 service.delete = async (userInfo, id, reason) => {
@@ -174,18 +298,181 @@ service.undoDelete = async (userInfo, id) => {
   );
 };
 
+// ---------------------------------------------------------
+// CHECK PENDING DUES
+// ---------------------------------------------------------
+
+// Helper function to check if customer has pending dues
+service.checkPendingDues = async (customerId) => {
+  try {
+    // Find all payments that are pending (status="pending" means not yet paid)
+    const query = {
+      customer: customerId,
+      isDeleted: false,
+      status: "pending",
+    };
+
+    const pendingPayments = await PaymentsModel.find(query).lean();
+
+    if (pendingPayments && pendingPayments.length > 0) {
+      // Calculate actual pending amount: amount_charged - amount_paid
+      const paymentsWithDues = [];
+      let totalDue = 0;
+
+      pendingPayments.forEach((payment) => {
+        const amountDue =
+          (payment.amount_charged || 0) - (payment.amount_paid || 0);
+
+        if (amountDue > 0) {
+          paymentsWithDues.push({
+            ...payment,
+            amountDue: amountDue,
+          });
+          totalDue += amountDue;
+        }
+      });
+
+      if (paymentsWithDues.length > 0 && totalDue > 0) {
+        return {
+          hasPendingDues: true,
+          totalDue: totalDue,
+          pendingCount: paymentsWithDues.length,
+          payments: paymentsWithDues,
+        };
+      }
+    }
+
+    return {
+      hasPendingDues: false,
+      totalDue: 0,
+      pendingCount: 0,
+      payments: [],
+    };
+  } catch (error) {
+    console.error("❌ [checkPendingDues] Error:", error);
+    return {
+      hasPendingDues: false,
+      totalDue: 0,
+      pendingCount: 0,
+      payments: [],
+    };
+  }
+};
+
+// Helper function to check if vehicle has pending dues
+service.checkVehiclePendingDues = async (customerId, vehicleId) => {
+  try {
+    // Get customer to find vehicle details
+    const customer = await CustomersModel.findById(customerId).lean();
+    if (!customer) {
+      throw new Error("Customer not found");
+    }
+
+    const vehicle = customer.vehicles.find(
+      (v) => v._id.toString() === vehicleId,
+    );
+    if (!vehicle) {
+      throw new Error("Vehicle not found");
+    }
+
+    console.log(
+      `🚗 [checkVehiclePendingDues] Checking dues for vehicle: ${vehicle.registration_no}`,
+    );
+
+    // Query payments directly by customer and vehicle registration_no
+    const pendingPayments = await PaymentsModel.find({
+      customer: customerId,
+      "vehicle.registration_no": vehicle.registration_no,
+      isDeleted: false,
+      status: "pending",
+    }).lean();
+
+    console.log(
+      `📊 [checkVehiclePendingDues] Found ${pendingPayments.length} pending payments for vehicle ${vehicle.registration_no}`,
+    );
+
+    if (pendingPayments && pendingPayments.length > 0) {
+      // Calculate actual pending amount: amount_charged - amount_paid
+      const paymentsWithDues = [];
+      let totalDue = 0;
+
+      pendingPayments.forEach((payment) => {
+        const amountDue =
+          (payment.amount_charged || 0) - (payment.amount_paid || 0);
+        if (amountDue > 0) {
+          paymentsWithDues.push({
+            ...payment,
+            amountDue: amountDue,
+          });
+          totalDue += amountDue;
+        }
+      });
+
+      if (paymentsWithDues.length > 0) {
+        console.log(
+          `💰 [checkVehiclePendingDues] Vehicle ${vehicle.registration_no} has AED ${totalDue} pending dues`,
+        );
+        return {
+          hasPendingDues: true,
+          totalDue: totalDue,
+          pendingCount: paymentsWithDues.length,
+          payments: paymentsWithDues,
+          vehicleNo: vehicle.registration_no,
+        };
+      }
+    }
+
+    console.log(
+      `✅ [checkVehiclePendingDues] Vehicle ${vehicle.registration_no} has no pending dues`,
+    );
+    return {
+      hasPendingDues: false,
+      totalDue: 0,
+      pendingCount: 0,
+      payments: [],
+      vehicleNo: vehicle.registration_no,
+    };
+  } catch (error) {
+    console.error("❌ [checkVehiclePendingDues] Error:", error);
+    throw error;
+  }
+};
+
 service.vehicleDeactivate = async (userInfo, id, payload) => {
+  // Find customer with this vehicle
+  const customer = await CustomersModel.findOne({ "vehicles._id": id }).lean();
+  if (!customer) {
+    throw new Error("VEHICLE_NOT_FOUND");
+  }
+
+  // Check for pending dues on this vehicle
+  const duesCheck = await service.checkVehiclePendingDues(customer._id, id);
+
+  if (duesCheck.hasPendingDues) {
+    const error = new Error(
+      `PENDING_DUES: Vehicle ${duesCheck.vehicleNo} has pending dues of AED ${duesCheck.totalDue.toFixed(2)}. Please clear all outstanding payments before deactivating.`,
+    );
+    error.code = "PENDING_DUES";
+    error.totalDue = duesCheck.totalDue;
+    error.pendingCount = duesCheck.pendingCount;
+    error.payments = duesCheck.payments; // Include full payment details
+    throw error;
+  }
+
   await CustomersModel.updateOne(
     { "vehicles._id": id },
     {
       $set: {
         "vehicles.$.status": 2,
-        "vehicles.$.deactivateReason": payload.deactivateReason,
-        "vehicles.$.deactivateDate": payload.deactivateDate,
+        "vehicles.$.deactivateReason": payload.deactivateReason || null,
+        "vehicles.$.deactivateDate": payload.deactivateDate || new Date(),
+        "vehicles.$.reactivateDate": payload.reactivateDate || null,
         "vehicles.$.deactivatedBy": userInfo._id,
       },
     },
   );
+
+  return { message: "Vehicle deactivated successfully" };
 };
 
 service.vehicleActivate = async (userInfo, id, payload) => {
@@ -197,15 +484,44 @@ service.vehicleActivate = async (userInfo, id, payload) => {
         "vehicles.$.start_date": payload.start_date,
         "vehicles.$.activatedBy": userInfo._id,
       },
+      $unset: {
+        "vehicles.$.deactivateReason": "",
+        "vehicles.$.deactivateDate": "",
+        "vehicles.$.reactivateDate": "",
+      },
     },
   );
 };
 
 service.deactivate = async (userInfo, id, payload) => {
+  // Check for pending dues before deactivating customer
+  const duesCheck = await service.checkPendingDues(id);
+
+  if (duesCheck.hasPendingDues) {
+    const error = new Error(
+      `PENDING_DUES: Customer has outstanding payment of AED ${duesCheck.totalDue.toFixed(2)} across ${duesCheck.pendingCount} transaction(s). Please clear all dues before deactivating.`,
+    );
+    error.code = "PENDING_DUES";
+    error.totalDue = duesCheck.totalDue;
+    error.pendingCount = duesCheck.pendingCount;
+    error.payments = duesCheck.payments; // Include full payment details
+    throw error;
+  }
+
   await CustomersModel.updateOne(
     { _id: id },
-    { $set: { status: 2, ...payload } },
+    {
+      $set: {
+        status: 2,
+        deactivateReason: payload.deactivateReason || null,
+        deactivateDate: payload.deactivateDate || new Date(),
+        reactivateDate: payload.reactivateDate || null,
+        deactivatedBy: userInfo._id,
+      },
+    },
   );
+
+  return { message: "Customer deactivated successfully" };
 };
 
 service.archive = async (userInfo, id, payload) => {
@@ -500,18 +816,115 @@ function isValidObjectId(id) {
 service.washesList = async (userInfo, query, customerId) => {
   const paginationData = CommonHelper.paginationData(query);
   const findQuery = { isDeleted: false, customer: customerId };
+
+  // Add date filtering if provided
+  if (query.startDate || query.endDate) {
+    findQuery.assignedDate = {};
+    if (query.startDate) {
+      findQuery.assignedDate.$gte = new Date(query.startDate);
+    }
+    if (query.endDate) {
+      const endDate = new Date(query.endDate);
+      endDate.setHours(23, 59, 59, 999); // Include full end day
+      findQuery.assignedDate.$lte = endDate;
+    }
+  }
+
   const total = await JobsModel.countDocuments(findQuery);
   let data = await JobsModel.find(findQuery)
+    .populate("customer", "name mobile email vehicles")
+    .populate("worker", "name mobile")
+    .populate("building", "name")
+    .populate("location", "address city state")
     .sort({ _id: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
     .lean();
-  return { total, data };
+
+  // Enrich data with vehicle details from customer's vehicles array
+  data = data.map((job) => {
+    if (job.customer && job.customer.vehicles && job.vehicle) {
+      console.log(
+        `🔍 Job ${job.scheduleId}: Looking for vehicle ${job.vehicle}`,
+      );
+      console.log(
+        `👤 Customer has ${job.customer.vehicles.length} vehicles:`,
+        job.customer.vehicles.map((v) => ({
+          id: v._id.toString(),
+          reg: v.registration_no,
+          park: v.parking_no,
+        })),
+      );
+
+      const vehicleData = job.customer.vehicles.find(
+        (v) => v._id.toString() === job.vehicle.toString(),
+      );
+
+      if (vehicleData) {
+        console.log(
+          `✅ Match found: ${vehicleData.registration_no} / ${vehicleData.parking_no}`,
+        );
+        job.registration_no = vehicleData.registration_no;
+        job.parking_no = vehicleData.parking_no;
+        job.vehicle_type = vehicleData.vehicle_type;
+      } else {
+        console.log(`❌ No match found for vehicle ${job.vehicle}`);
+      }
+    } else {
+      console.log(
+        `⚠️ Job ${job.scheduleId}: Missing customer vehicles or vehicle ID`,
+      );
+    }
+    return job;
+  });
+
+  // Get customer info for header
+  const customerInfo = await CustomersModel.findById(customerId)
+    .select("name mobile email")
+    .lean();
+
+  return { total, data, customerInfo };
 };
 
 service.exportWashesList = async (userInfo, query, customerId) => {
   const findQuery = { isDeleted: false, customer: customerId };
-  let data = await JobsModel.find(findQuery).sort({ _id: -1 }).lean();
+
+  // Add date filtering if provided
+  if (query.startDate || query.endDate) {
+    findQuery.assignedDate = {};
+    if (query.startDate) {
+      findQuery.assignedDate.$gte = new Date(query.startDate);
+    }
+    if (query.endDate) {
+      const endDate = new Date(query.endDate);
+      endDate.setHours(23, 59, 59, 999);
+      findQuery.assignedDate.$lte = endDate;
+    }
+  }
+
+  let data = await JobsModel.find(findQuery)
+    .populate("customer", "name mobile email vehicles")
+    .populate("worker", "name mobile")
+    .populate("building", "name")
+    .populate("location", "address city state")
+    .sort({ _id: -1 })
+    .lean();
+
+  // Enrich data with vehicle details from customer's vehicles array
+  data = data.map((job) => {
+    if (job.customer && job.customer.vehicles && job.vehicle) {
+      const vehicleData = job.customer.vehicles.find(
+        (v) => v._id.toString() === job.vehicle.toString(),
+      );
+      if (vehicleData) {
+        job.registration_no = vehicleData.registration_no;
+        job.parking_no = vehicleData.parking_no;
+        job.vehicle_type = vehicleData.vehicle_type;
+      }
+    }
+    return job;
+  });
+
   const exportMap = [];
   for (const iterator of data) {
     exportMap.push({
@@ -519,8 +932,297 @@ service.exportWashesList = async (userInfo, query, customerId) => {
       assignedDate: iterator.assignedDate
         ? moment(iterator.assignedDate).format("YYYY-MM-DD HH:mm:ss")
         : "",
+      completedDate: iterator.completedDate
+        ? moment(iterator.completedDate).format("YYYY-MM-DD HH:mm:ss")
+        : "",
       status: (iterator.status || "").toUpperCase(),
+      vehicleRegistration: iterator.registration_no || "",
+      vehicleParking: iterator.parking_no || "",
+      building: iterator.building?.name || "",
+      location: iterator.location?.address || "",
+      worker: iterator.worker?.name || "",
+      workerMobile: iterator.worker?.mobile || "",
+      customerName: iterator.customer?.name || "",
+      customerMobile: iterator.customer?.mobile || "",
+      price: iterator.price || 0,
+      tips: iterator.tips || 0,
+      immediate: iterator.immediate ? "Yes" : "No",
     });
   }
   return exportMap;
+};
+
+// ---------------------------------------------------------
+// HELPER FUNCTIONS FOR IMPORT
+// ---------------------------------------------------------
+
+const getCellText = (cell) => {
+  if (!cell || cell.value === null || cell.value === undefined) return "";
+  if (typeof cell.value === "object" && cell.value.text)
+    return cell.value.text.toString().trim();
+  return cell.value.toString().trim();
+};
+
+const parseExcelDate = (value) => {
+  if (!value) return undefined;
+
+  // Handle Excel serial number
+  if (typeof value === "number") {
+    return new Date(Math.round((value - 25569) * 86400 * 1000));
+  }
+
+  if (typeof value === "string") {
+    const raw = value.trim();
+
+    // Try DD/MM/YYYY format (e.g., 01/02/2026)
+    if (raw.includes("/")) {
+      const parts = raw.split("/");
+      if (parts.length === 3) {
+        const day = parseInt(parts[0]);
+        const month = parseInt(parts[1]);
+        const year = parseInt(parts[2]);
+        return new Date(year, month - 1, day);
+      }
+    }
+
+    // Try YYYY-MM-DD format
+    if (raw.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      return new Date(raw);
+    }
+  }
+
+  const date = new Date(value);
+  return isNaN(date.getTime()) ? undefined : date;
+};
+
+// Generate auto mobile number (2000000xxx format)
+const generateAutoMobile = async () => {
+  const latestCustomer = await CustomersModel.findOne({
+    mobile: /^2000000\d{3}$/,
+  })
+    .sort({ mobile: -1 })
+    .lean();
+
+  if (latestCustomer && latestCustomer.mobile) {
+    const lastNumber = parseInt(latestCustomer.mobile.substring(7));
+    const nextNumber = lastNumber + 1;
+    return `2000000${String(nextNumber).padStart(3, "0")}`;
+  }
+
+  return "2000000001"; // Start from 2000000001
+};
+
+// ---------------------------------------------------------
+// IMPORT FROM EXCEL
+// ---------------------------------------------------------
+
+service.importDataFromExcel = async (userInfo, fileBuffer) => {
+  console.log("🚀 [CUSTOMER IMPORT START] Processing Excel file...");
+
+  const ExcelJS = require("exceljs");
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(fileBuffer);
+  const worksheet = workbook.getWorksheet(1);
+
+  if (!worksheet) {
+    console.error("❌ [IMPORT ERROR] No worksheet found");
+    return { success: 0, errors: [{ error: "No worksheet found" }] };
+  }
+
+  console.log(`📊 [IMPORT INFO] Total rows in file: ${worksheet.rowCount}`);
+
+  const excelData = [];
+
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return; // Skip header
+
+    const firstName = getCellText(row.getCell(1));
+    const lastName = getCellText(row.getCell(2));
+    const mobile = getCellText(row.getCell(3));
+    const email = getCellText(row.getCell(4));
+    const registration_no = getCellText(row.getCell(5));
+    const parking_no = getCellText(row.getCell(6));
+    const schedule_type = getCellText(row.getCell(7));
+    const schedule_days = getCellText(row.getCell(8));
+    const amount = getCellText(row.getCell(9));
+    const advance_amount = getCellText(row.getCell(10));
+    const start_date = row.getCell(11).value;
+
+    console.log(
+      `🔍 Reading Row ${rowNumber}: ${firstName} ${lastName}, Mobile="${mobile}", Vehicle="${registration_no}"`,
+    );
+
+    // Skip completely empty rows
+    if (!firstName && !registration_no) {
+      console.log(`⚠️ Skipped empty row at ${rowNumber}`);
+      return;
+    }
+
+    excelData.push({
+      firstName,
+      lastName,
+      mobile, // Can be empty - will auto-generate
+      email,
+      registration_no,
+      parking_no,
+      schedule_type,
+      schedule_days,
+      amount,
+      advance_amount,
+      start_date,
+      rowNumber,
+    });
+  });
+
+  console.log(`✅ [IMPORT INFO] Extracted ${excelData.length} valid rows.`);
+
+  const results = { success: 0, errors: [], created: 0, updated: 0 };
+  const customerGroups = new Map(); // Group vehicles by customer identifier
+
+  // Step 1: Group rows by customer (by mobile or firstName+lastName)
+  for (const row of excelData) {
+    try {
+      // Validate required fields
+      if (!row.firstName) {
+        throw new Error("First Name is required");
+      }
+      if (!row.registration_no) {
+        throw new Error("Vehicle Registration No is required");
+      }
+      if (!row.schedule_type) {
+        throw new Error("Schedule Type is required");
+      }
+      if (!row.amount) {
+        throw new Error("Amount is required");
+      }
+
+      // Auto-generate mobile if not provided
+      let mobile = row.mobile;
+      if (!mobile || mobile.trim() === "") {
+        // Check if we already generated a mobile for this customer in this batch
+        const customerKey = `${row.firstName}-${row.lastName}`.toLowerCase();
+        if (
+          customerGroups.has(customerKey) &&
+          customerGroups.get(customerKey).mobile
+        ) {
+          mobile = customerGroups.get(customerKey).mobile;
+        } else {
+          mobile = await generateAutoMobile();
+          console.log(
+            `📱 Auto-generated mobile: ${mobile} for ${row.firstName}`,
+          );
+        }
+      }
+
+      // Use mobile as the primary grouping key
+      if (!customerGroups.has(mobile)) {
+        customerGroups.set(mobile, {
+          mobile,
+          firstName: row.firstName,
+          lastName: row.lastName,
+          email: row.email,
+          vehicles: [],
+        });
+      }
+
+      // Add vehicle to this customer
+      customerGroups.get(mobile).vehicles.push({
+        registration_no: row.registration_no,
+        parking_no: row.parking_no || "",
+        schedule_type: row.schedule_type,
+        schedule_days: row.schedule_days || "",
+        amount: parseFloat(row.amount) || 0,
+        advance_amount: parseFloat(row.advance_amount) || 0,
+        start_date: parseExcelDate(row.start_date) || new Date(),
+        status: 1,
+        rowNumber: row.rowNumber,
+      });
+    } catch (err) {
+      console.error(
+        `❌ Row ${row.rowNumber} Error (${row.firstName}):`,
+        err.message,
+      );
+      results.errors.push({
+        row: row.rowNumber,
+        name: `${row.firstName} ${row.lastName}`,
+        error: err.message,
+      });
+    }
+  }
+
+  // Step 2: Process each customer group
+  for (const [mobile, customerData] of customerGroups.entries()) {
+    try {
+      // Check if customer exists by mobile
+      let customer = await CustomersModel.findOne({ mobile: mobile });
+
+      if (customer) {
+        console.log(`🔄 Updating existing customer: ${customerData.firstName}`);
+
+        // Update customer basic info (keep existing building/location)
+        customer.firstName = customerData.firstName;
+        customer.lastName = customerData.lastName || "";
+        customer.email = customerData.email || "";
+
+        // Add new vehicles (skip duplicates by registration_no)
+        for (const newVehicle of customerData.vehicles) {
+          const vehicleExists = customer.vehicles.some(
+            (v) =>
+              v.registration_no.toLowerCase() ===
+              newVehicle.registration_no.toLowerCase(),
+          );
+
+          if (!vehicleExists) {
+            customer.vehicles.push(newVehicle);
+            console.log(`  ➕ Added vehicle: ${newVehicle.registration_no}`);
+          } else {
+            console.log(
+              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists, skipped`,
+            );
+          }
+        }
+
+        customer.updatedBy = userInfo._id;
+        await CustomersModel.updateOne({ _id: customer._id }, customer);
+        results.updated++;
+      } else {
+        console.log(
+          `➕ Creating new customer: ${customerData.firstName} with ${customerData.vehicles.length} vehicle(s)`,
+        );
+
+        const id = await CounterService.id("customers");
+        const newCustomer = {
+          id,
+          firstName: customerData.firstName,
+          lastName: customerData.lastName || "",
+          mobile: mobile,
+          email: customerData.email || "",
+          flat_no: "",
+          building: null,
+          location: null,
+          vehicles: customerData.vehicles,
+          status: 1,
+          createdBy: userInfo._id,
+        };
+
+        await new CustomersModel(newCustomer).save();
+        results.created++;
+      }
+
+      results.success += customerData.vehicles.length;
+    } catch (err) {
+      console.error(
+        `❌ Customer Error (${customerData.firstName}):`,
+        err.message,
+      );
+      results.errors.push({
+        row: customerData.vehicles[0]?.rowNumber || 0,
+        name: `${customerData.firstName} ${customerData.lastName}`,
+        error: err.message,
+      });
+    }
+  }
+
+  console.log("🏁 [CUSTOMER IMPORT COMPLETE]", results);
+  return results;
 };

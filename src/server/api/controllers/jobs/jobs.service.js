@@ -354,50 +354,129 @@ service.monthlyStatement = async (userInfo, query) => {
   const year = moment(findQuery.assignedDate.$gte).format("YYYY");
 
   // =========================================================
-  // SCENARIO 1: WORKER SELECTED (Car-by-Car Detailed Report)
+  // SCENARIO 1: WORKER SELECTED - SHOW SCHEDULE (Not historical washes)
   // =========================================================
   if (query.workerId) {
+    // ✅ Query customers to get current vehicle assignments for this worker
+    const customers = await CustomersModel.find({
+      isDeleted: false,
+      "vehicles.worker": query.workerId,
+      "vehicles.status": 1, // Only active vehicles
+    }).lean();
+
     const carMap = new Map();
+    const monthStart = moment(new Date(query.year, query.month, 1)).startOf(
+      "month",
+    );
+    const monthEnd = moment(new Date(query.year, query.month, 1)).endOf(
+      "month",
+    );
 
-    data.forEach((job) => {
-      let vehicleInfo = null;
-      if (job.customer && job.customer.vehicles && job.vehicle) {
-        vehicleInfo = job.customer.vehicles.find(
-          (v) => v._id.toString() === job.vehicle.toString(),
-        );
-      }
+    // Process each customer's vehicles assigned to this worker
+    customers.forEach((customer) => {
+      const customerName =
+        `${customer.firstName || ""} ${customer.lastName || ""}`.trim() ||
+        customer.mobile ||
+        "Unknown";
 
-      const carKey = job.vehicle
-        ? job.vehicle.toString()
-        : `unknown_${job._id}`;
-      const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
+      customer.vehicles.forEach((vehicle) => {
+        // Only process vehicles assigned to this worker
+        if (vehicle.worker !== query.workerId || vehicle.status !== 1) return;
 
-      if (!carMap.has(carKey)) {
+        // Check if vehicle is active during this month
+        const vehicleStart = vehicle.start_date || vehicle.onboard_date;
+        const vehicleEnd = vehicle.deactivateDate;
+
+        // Skip if vehicle starts after month ends or ended before month starts
+        if (vehicleStart && moment(vehicleStart).isAfter(monthEnd)) return;
+        if (vehicleEnd && moment(vehicleEnd).isBefore(monthStart)) return;
+
+        // Convert schedule_days to day names
+        let scheduleDays = [];
+        if (vehicle.schedule_days && Array.isArray(vehicle.schedule_days)) {
+          scheduleDays = vehicle.schedule_days
+            .map((d) => {
+              if (typeof d === "object" && d.day) {
+                const dayMap = {
+                  Mon: "monday",
+                  Tue: "tuesday",
+                  Wed: "wednesday",
+                  Thu: "thursday",
+                  Fri: "friday",
+                  Sat: "saturday",
+                  Sun: "sunday",
+                };
+                return dayMap[d.day] || d.day.toLowerCase();
+              }
+              return typeof d === "string" ? d.toLowerCase() : "";
+            })
+            .filter((d) => d);
+        }
+
+        // Calculate schedule marks for each day in the month
+        const dailyMarks = new Array(daysInMonth).fill(0);
+        for (let day = 1; day <= daysInMonth; day++) {
+          const currentDate = moment(new Date(query.year, query.month, day));
+
+          // Check if date is within vehicle active period
+          if (vehicleStart && currentDate.isBefore(moment(vehicleStart), "day"))
+            continue;
+          if (vehicleEnd && currentDate.isAfter(moment(vehicleEnd), "day"))
+            continue;
+
+          // Check if this day matches the schedule
+          let isScheduled = false;
+          if (vehicle.schedule_type === "daily") {
+            isScheduled = true;
+          } else if (
+            vehicle.schedule_type === "weekly" &&
+            scheduleDays.length > 0
+          ) {
+            const dayNames = [
+              "sunday",
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday",
+              "saturday",
+            ];
+            const dayName = dayNames[currentDate.day()];
+            isScheduled = scheduleDays.includes(dayName);
+          }
+
+          if (isScheduled) {
+            dailyMarks[day - 1] = 1; // Mark as scheduled
+          }
+        }
+
+        const carKey = vehicle._id.toString();
         carMap.set(carKey, {
-          parkingNo: vehicleInfo?.parking_no || "",
-          carNumber: vehicleInfo?.registration_no || "",
-          dateOfStart: moment(job.assignedDate).format("DD-MMM"),
-          cleaning: job.immediate ? "D" : "W3",
-          dailyMarks: new Array(daysInMonth).fill(0),
-          amount: job.price || 0,
-          duDate: moment(job.completedDate || job.assignedDate).format(
-            "DD-MMM",
-          ),
-          workerName: job.worker?.name || "",
-          locationName: job.location?.name || "",
-          buildingName: job.building?.name || "",
-          tips: 0, // ✅ Initialize tips to 0
+          parkingNo: vehicle.parking_no || "",
+          carNumber: vehicle.registration_no || "",
+          customerName: customerName,
+          dateOfStart: vehicleStart
+            ? moment(vehicleStart).format("DD-MMM")
+            : "-",
+          cleaning:
+            vehicle.schedule_type === "daily"
+              ? "D"
+              : vehicle.schedule_type === "onetime"
+                ? "OT"
+                : "W3",
+          dailyMarks: dailyMarks,
+          amount: vehicle.amount || 0,
+          duDate: vehicleEnd ? moment(vehicleEnd).format("DD-MMM") : "-",
+          workerName: "",
+          locationName: "",
+          buildingName: "",
+          tips: 0,
+          scheduleType: vehicle.schedule_type || "daily",
+          scheduleDays: scheduleDays,
+          startDate: vehicleStart,
+          endDate: vehicleEnd,
         });
-      }
-
-      const carData = carMap.get(carKey);
-
-      // ✅ Accumulate Tips (Ensure it's a number)
-      carData.tips += Number(job.tips) || 0;
-
-      if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth) {
-        carData.dailyMarks[dayOfMonth - 1]++;
-      }
+      });
     });
 
     const carList = Array.from(carMap.values());
@@ -445,7 +524,9 @@ service.monthlyStatement = async (userInfo, query) => {
   if (query.format === "json") {
     return workerSummaries.map((worker, index) => ({
       slNo: index + 1,
+      workerId: worker.workerId, // ✅ Include workerId for filtering
       name: worker.workerName,
+      workerName: worker.workerName, // ✅ Include for consistency
       dailyCounts: worker.dailyCounts,
       tips: worker.tips, // ✅ Send tips to frontend
     }));

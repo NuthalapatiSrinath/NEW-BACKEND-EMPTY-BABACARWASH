@@ -9,6 +9,11 @@ const UploadHelper = require("../../../helpers/upload.helper");
 
 // Excel Export/Import
 router.get("/export/list", AuthHelper.authenticate, controller.exportData);
+router.get(
+  "/import/template",
+  AuthHelper.authenticate,
+  controller.downloadTemplate,
+);
 
 router.post(
   "/import/list",
@@ -78,6 +83,11 @@ router.put(
   "/vehicle/:id/activate",
   AuthHelper.authenticate,
   controller.vehicleActivate,
+);
+router.get(
+  "/vehicle/:id/pending-dues",
+  AuthHelper.authenticate,
+  controller.checkVehiclePendingDues,
 );
 
 // History & Wash Reports

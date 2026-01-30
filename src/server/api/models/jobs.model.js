@@ -10,6 +10,8 @@ const schema = new mongoose.Schema(
     customer: { type: String, ref: "customers" },
     worker: { type: String, ref: "workers" },
     vehicle: { type: String },
+    registration_no: { type: String }, // Vehicle registration from customer.vehicles
+    parking_no: { type: String }, // Parking number from customer.vehicles
     location: { type: String, ref: "locations" },
     building: { type: String, ref: "buildings" },
     locationMap: { type: Object },

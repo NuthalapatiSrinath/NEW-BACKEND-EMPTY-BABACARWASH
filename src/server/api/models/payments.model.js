@@ -11,6 +11,8 @@ const schema = new mongoose.Schema(
     createdBy: { type: String, required: true, ref: "users" },
     worker: { type: String, ref: "worker" },
     customer: { type: String, ref: "customers" },
+    building: { type: String, ref: "buildings" }, // ✅ ADDED: Building reference
+    mall: { type: String, ref: "malls" }, // ✅ ADDED: Mall reference
     amount_charged: { type: Number, default: 0 },
     amount_paid: { type: Number, default: 0 },
     balance: { type: Number, default: 0 },

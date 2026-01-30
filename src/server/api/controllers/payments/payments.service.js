@@ -87,9 +87,21 @@ service.list = async (userInfo, query) => {
       "records",
     );
 
+    // CRITICAL FIX: Convert empty strings to null before populating
+    // Mongoose populate fails on empty strings "" - they must be null or valid ObjectIds
+    data = data.map((payment) => {
+      if (payment.worker === "") payment.worker = null;
+      if (payment.building === "") payment.building = null;
+      if (payment.customer && payment.customer.building === "")
+        payment.customer.building = null;
+      if (payment.customer && payment.customer.location === "")
+        payment.customer.location = null;
+      return payment;
+    });
+
     // Try to populate each reference separately and catch errors
     try {
-      // Populate worker (usually reliable)
+      // Populate worker (filter out null values)
       data = await PaymentsModel.populate(data, {
         path: "worker",
         model: "workers",
@@ -97,6 +109,17 @@ service.list = async (userInfo, query) => {
       console.log("✅ [SERVICE] Workers populated");
     } catch (e) {
       console.warn("⚠️ [SERVICE] Worker populate failed:", e.message);
+    }
+
+    try {
+      // Populate building (direct field on payment)
+      data = await PaymentsModel.populate(data, {
+        path: "building",
+        model: "buildings",
+      });
+      console.log("✅ [SERVICE] Buildings populated");
+    } catch (e) {
+      console.warn("⚠️ [SERVICE] Building populate failed:", e.message);
     }
 
     try {
@@ -154,6 +177,14 @@ service.list = async (userInfo, query) => {
     }
 
     console.log("📦 [SERVICE] Final data count:", data.length, "records");
+
+    // Log sample populated data for debugging
+    if (data.length > 0) {
+      console.log("🔍 [SERVICE] Sample payment document structure:");
+      console.log("- building:", data[0].building);
+      console.log("- worker:", data[0].worker);
+      console.log("- customer.building:", data[0].customer?.building);
+    }
 
     const totalPayments = await PaymentsModel.aggregate([
       { $match: findQuery },
@@ -595,7 +626,11 @@ service.monthlyStatement = async (userInfo, query) => {
       { path: "job", model: "jobs" },
       { path: "worker", model: "workers", select: "name" },
       { path: "building", model: "buildings", select: "name" },
-      { path: "customer", model: "customers" },
+      {
+        path: "customer",
+        model: "customers",
+        populate: { path: "building", model: "buildings", select: "name" },
+      },
     ]);
   } catch (err) {
     console.error("Populate Warning:", err.message);
@@ -647,7 +682,10 @@ service.monthlyStatement = async (userInfo, query) => {
       remarks: item.notes || "-", // 17. Remarks
 
       // Extra metadata for Grouping
-      buildingName: item.building?.name || "Unknown Building",
+      buildingName:
+        item.building?.name ||
+        item.customer?.building?.name ||
+        "Unknown Building",
       workerName: item.worker?.name || "Unassigned",
     };
   };
@@ -689,7 +727,7 @@ service.monthlyStatement = async (userInfo, query) => {
 
   // 1. Define Columns (17 Required Fields)
   sheet.columns = [
-    { header: "Serial Number", key: "slNo", width: 8 },
+    { header: "Serial Number", key: "slNo", width: 12 },
     { header: "Parking Number", key: "parkingNo", width: 15 },
     { header: "Car Number", key: "carNo", width: 15 },
     { header: "Mobile Number", key: "mobile", width: 15 },

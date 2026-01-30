@@ -183,7 +183,24 @@ controller.update = async (req, res) => {
     const data = await service.update(user, params.id, body);
     return res.status(200).json({ statusCode: 200, message: "success", data });
   } catch (error) {
-    return res.status(500).json({ message: "Internal server error", error });
+    console.error("Customer Update Error:", error);
+
+    // Handle pending dues error
+    if (error.code === "PENDING_DUES") {
+      return res.status(400).json({
+        statusCode: 400,
+        message: error.message,
+        code: "PENDING_DUES",
+        totalDue: error.totalDue,
+        pendingCount: error.pendingCount,
+        payments: error.payments || [],
+      });
+    }
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message || error,
+    });
   }
 };
 
@@ -223,7 +240,23 @@ controller.vehicleDeactivate = async (req, res) => {
     const data = await service.vehicleDeactivate(user, params.id, body);
     return res.status(200).json({ statusCode: 200, message: "success", data });
   } catch (error) {
-    return res.status(500).json({ message: "Internal server error", error });
+    console.error("Vehicle Deactivate Error:", error);
+
+    // Handle pending dues error
+    if (error.code === "PENDING_DUES") {
+      return res.status(400).json({
+        statusCode: 400,
+        message: error.message,
+        code: "PENDING_DUES",
+        totalDue: error.totalDue,
+        pendingCount: error.pendingCount,
+        payments: error.payments || [],
+      });
+    }
+
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
   }
 };
 
@@ -237,13 +270,60 @@ controller.vehicleActivate = async (req, res) => {
   }
 };
 
+controller.checkVehiclePendingDues = async (req, res) => {
+  try {
+    const { params } = req;
+    const vehicleId = params.id;
+
+    // Find customer with this vehicle
+    const customer = await require("../../models/customers.model")
+      .findOne({ "vehicles._id": vehicleId })
+      .lean();
+    if (!customer) {
+      return res.status(404).json({ message: "Vehicle not found" });
+    }
+
+    const duesCheck = await service.checkVehiclePendingDues(
+      customer._id,
+      vehicleId,
+    );
+
+    return res.status(200).json({
+      statusCode: 200,
+      message: "success",
+      data: duesCheck,
+    });
+  } catch (error) {
+    console.error("Check Vehicle Pending Dues Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
+  }
+};
+
 controller.deactivate = async (req, res) => {
   try {
     const { user, params, body } = req;
     const data = await service.deactivate(user, params.id, body);
     return res.status(200).json({ statusCode: 200, message: "success", data });
   } catch (error) {
-    return res.status(500).json({ message: "Internal server error", error });
+    console.error("Customer Deactivate Error:", error);
+
+    // Handle pending dues error
+    if (error.code === "PENDING_DUES") {
+      return res.status(400).json({
+        statusCode: 400,
+        message: error.message,
+        code: "PENDING_DUES",
+        totalDue: error.totalDue,
+        pendingCount: error.pendingCount,
+        payments: error.payments || [],
+      });
+    }
+
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
   }
 };
 
@@ -300,5 +380,118 @@ controller.exportWashesList = async (req, res) => {
     res.end();
   } catch (error) {
     return res.status(500).json({ message: "Internal server error", error });
+  }
+};
+
+// --- DOWNLOAD IMPORT TEMPLATE ---
+controller.downloadTemplate = async (req, res) => {
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Customers Template");
+
+    worksheet.columns = [
+      { header: "First Name*", key: "firstName", width: 20 },
+      { header: "Last Name", key: "lastName", width: 20 },
+      { header: "Mobile (Optional)", key: "mobile", width: 15 },
+      { header: "Email", key: "email", width: 25 },
+      { header: "Vehicle Registration No*", key: "registration_no", width: 20 },
+      { header: "Parking No", key: "parking_no", width: 15 },
+      {
+        header: "Schedule Type* (daily/weekly/onetime)",
+        key: "schedule_type",
+        width: 30,
+      },
+      { header: "Schedule Days", key: "schedule_days", width: 25 },
+      { header: "Amount*", key: "amount", width: 12 },
+      { header: "Advance Amount", key: "advance_amount", width: 15 },
+      { header: "Start Date (DD/MM/YYYY)", key: "start_date", width: 20 },
+    ];
+
+    // Add sample rows - Multiple vehicles for same customer
+    worksheet.addRow({
+      firstName: "John",
+      lastName: "Doe",
+      mobile: "", // Leave empty for auto-generation
+      email: "john@example.com",
+      registration_no: "ABC123",
+      parking_no: "P-101",
+      schedule_type: "daily",
+      schedule_days: "Monday,Tuesday,Wednesday,Thursday,Friday",
+      amount: "300",
+      advance_amount: "100",
+      start_date: "01/02/2026",
+    });
+
+    // Same customer, different vehicle
+    worksheet.addRow({
+      firstName: "John",
+      lastName: "Doe",
+      mobile: "", // Same mobile or leave empty - will link to same customer
+      email: "john@example.com",
+      registration_no: "XYZ789", // Different vehicle
+      parking_no: "P-102",
+      schedule_type: "weekly",
+      schedule_days: "Monday,Wednesday,Friday",
+      amount: "250",
+      advance_amount: "50",
+      start_date: "01/02/2026",
+    });
+
+    // Third sample - onetime schedule
+    worksheet.addRow({
+      firstName: "Jane",
+      lastName: "Smith",
+      mobile: "971501234567", // Or leave empty for auto-generation
+      email: "jane@example.com",
+      registration_no: "LMN456",
+      parking_no: "P-201",
+      schedule_type: "onetime",
+      schedule_days: "",
+      amount: "150",
+      advance_amount: "0",
+      start_date: "15/02/2026",
+    });
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="customers-import-template.xlsx"`,
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    console.error("Template download error:", error);
+    return res.status(500).json({ message: "Internal server error", error });
+  }
+};
+
+// --- IMPORT EXCEL DATA ---
+controller.importData = async (req, res) => {
+  try {
+    const { user } = req;
+
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    const fileBuffer = require("fs").readFileSync(
+      req.file.filepath || req.file.path,
+    );
+    const results = await service.importDataFromExcel(user, fileBuffer);
+
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Import completed",
+      data: results,
+    });
+  } catch (error) {
+    console.error("Import error:", error);
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
   }
 };
