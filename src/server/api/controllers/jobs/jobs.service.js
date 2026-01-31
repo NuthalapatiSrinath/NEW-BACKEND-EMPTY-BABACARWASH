@@ -107,7 +107,7 @@ service.list = async (userInfo, rawQuery) => {
   const total = await JobsModel.countDocuments(findQuery);
 
   let data = await JobsModel.find(findQuery)
-    .sort({ completedDate: -1 })
+    .sort({ assignedDate: -1, createdAt: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
     .lean();
@@ -123,11 +123,32 @@ service.list = async (userInfo, rawQuery) => {
     console.warn("List Populate Warning (Ignored):", e.message);
   }
 
+  // Map vehicle data - use stored fields or populate from customer.vehicles
   for (const iterator of data) {
-    if (iterator.customer && iterator.customer.vehicles) {
-      iterator.vehicle = iterator.customer.vehicles.find(
-        (e) => e._id == iterator.vehicle,
+    // If job already has registration_no and parking_no stored, use those
+    if (iterator.registration_no || iterator.parking_no) {
+      iterator.vehicle = {
+        _id: iterator.vehicle,
+        registration_no: iterator.registration_no,
+        parking_no: iterator.parking_no,
+      };
+    }
+    // Otherwise, try to populate from customer.vehicles array
+    else if (
+      iterator.customer &&
+      iterator.customer.vehicles &&
+      iterator.vehicle
+    ) {
+      const vehicleData = iterator.customer.vehicles.find(
+        (e) => e._id.toString() === iterator.vehicle?.toString(),
       );
+      if (vehicleData) {
+        iterator.vehicle = {
+          _id: vehicleData._id,
+          registration_no: vehicleData.registration_no,
+          parking_no: vehicleData.parking_no,
+        };
+      }
     }
   }
 

@@ -36,6 +36,31 @@ service.list = async (userInfo, query) => {
             dateFilter.createdAt.$lte = endDate;
           }
         }
+
+        console.log("📅 [SERVICE] Date filter applied:");
+        console.log(
+          "  Start:",
+          startDate.toISOString(),
+          "→",
+          startDate.toString(),
+        );
+        console.log(
+          "  End:",
+          dateFilter.createdAt.$lte
+            ? new Date(query.endDate).toISOString()
+            : "N/A",
+        );
+
+        // Log for debugging
+        console.log("🔍 [DEBUG] Comparing with sample October date:");
+        console.log(
+          "  Oct 1 2025 00:00 IST would be stored as:",
+          new Date("2025-10-01T00:00:00+05:30").toISOString(),
+        );
+        console.log(
+          "  Oct 1 2025 00:00 UTC would be stored as:",
+          new Date("2025-10-01T00:00:00Z").toISOString(),
+        );
       } else {
         console.warn(
           "⚠️ [SERVICE] Invalid startDate format, skipping date filter",
@@ -209,6 +234,20 @@ service.list = async (userInfo, query) => {
       card: card.length ? card[0].amount : 0,
       bank: bank.length ? bank[0].amount : 0,
     };
+
+    // Add computed fields to each payment record
+    data = data.map((payment) => {
+      const isMonthEndClosed = (payment.notes || "")
+        .toLowerCase()
+        .includes("closed by month-end");
+
+      return {
+        ...payment,
+        isMonthEndClosed, // Flag for month-end closed bills
+        paidAmount: payment.amount_paid || 0, // Already exists, but ensure it's present
+        balanceAmount: payment.balance || 0, // Already exists, but ensure it's present
+      };
+    });
 
     console.log("✅ [SERVICE] Returning data with counts:", counts);
     return { total, data, counts };
@@ -846,6 +885,546 @@ const isValidId = (id) => {
     ? /^[0-9a-fA-F]{24}$/.test(id)
     : mongoose.Types.ObjectId.isValid(id);
 };
+
+// ✅ Month-End Closing Service (with month/year selection)
+service.closeMonth = async (userInfo, month, year) => {
+  console.log(
+    "\n🔵 ========== [BACKEND] MONTH-END CLOSE SERVICE STARTED ==========",
+  );
+  console.log(`👤 User: ${userInfo.name} (${userInfo.role})`);
+  console.log(`📅 Target Month: ${month + 1}/${year} (Month index: ${month})`);
+
+  try {
+    // Use provided month/year or default to current
+    const targetMonth = month !== undefined ? month : new Date().getMonth();
+    const targetYear = year !== undefined ? year : new Date().getFullYear();
+
+    // Start and end of target month
+    const monthStart = new Date(targetYear, targetMonth, 1);
+    const monthEnd = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59, 999);
+
+    console.log("\n📅 Date Range Calculation:");
+    console.log(
+      `   Start: ${monthStart.toISOString()} → ${monthStart.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST`,
+    );
+    console.log(
+      `   End:   ${monthEnd.toISOString()} → ${monthEnd.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST`,
+    );
+
+    console.log("\n🔍 [SERVICE] Searching for pending bills...");
+    console.log("   Query Criteria:");
+    console.log("   - isDeleted: false");
+    console.log("   - onewash: false (residence only)");
+    console.log("   - status: pending");
+    console.log(`   - createdAt: $gte ${monthStart.toISOString()}`);
+    console.log(`   - createdAt: $lte ${monthEnd.toISOString()}`);
+
+    // Find ALL pending bills from the target month (including balance = 0)
+    const pendingBills = await PaymentsModel.find({
+      isDeleted: false,
+      onewash: false, // Only residence payments
+      status: "pending",
+      createdAt: {
+        $gte: monthStart,
+        $lte: monthEnd,
+      },
+    })
+      .populate("customer")
+      .lean();
+
+    console.log(
+      `\n📦 [SERVICE] Found ${pendingBills.length} pending bills to close`,
+    );
+    if (pendingBills.length > 0) {
+      console.log("\n📋 Bills Details:");
+      pendingBills.forEach((bill, idx) => {
+        const customerName = bill.customer
+          ? `${bill.customer.firstName || ""} ${bill.customer.lastName || ""}`.trim() ||
+            "N/A"
+          : "N/A";
+        console.log(`   ${idx + 1}. Bill ID: ${bill._id}`);
+        console.log(`      Customer: ${customerName}`);
+        console.log(`      Balance: ₹${bill.balance}`);
+        console.log(
+          `      Created: ${new Date(bill.createdAt).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
+        );
+      });
+    }
+
+    let closedCount = 0;
+    let newBillsCount = 0;
+
+    console.log("\n🔄 [SERVICE] Processing bills...");
+
+    for (const bill of pendingBills) {
+      try {
+        const customerName = bill.customer
+          ? `${bill.customer.firstName || ""} ${bill.customer.lastName || ""}`.trim() ||
+            "N/A"
+          : "N/A";
+        console.log(
+          `\n   📌 Processing Bill ${closedCount + 1}/${pendingBills.length}`,
+        );
+        console.log(`      Bill ID: ${bill._id}`);
+        console.log(`      Customer: ${customerName}`);
+        console.log(`      Current Balance: ₹${bill.balance}`);
+
+        // 1. Close the old bill as "completed" with special timestamp
+        console.log(`      🔒 Closing bill as 'completed'...`);
+        const closeTimestamp = new Date();
+        const closedBalance = bill.balance; // Store balance before closing
+
+        await PaymentsModel.updateOne(
+          { _id: bill._id },
+          {
+            $set: {
+              status: "completed", // Close it
+              balance: 0, // Set balance to 0 (carried forward to next month)
+              collectedDate: closeTimestamp, // Mark as "paid" by month-end close
+              notes:
+                (bill.notes || "") +
+                (bill.notes ? " | " : "") +
+                `Closed by Month-End on ${closeTimestamp.toLocaleDateString()} - Carried Forward: ${closedBalance} AED`,
+              updatedBy: userInfo._id,
+              updatedAt: closeTimestamp,
+            },
+          },
+        );
+        closedCount++;
+        console.log(
+          `      ✅ Bill closed successfully - Balance ${closedBalance} carried forward`,
+        );
+
+        // 2. Check if next month bill already exists, update it or create new one
+        const billDate = new Date(bill.createdAt);
+        const nextMonth = billDate.getMonth() + 1;
+        const nextYear = billDate.getFullYear() + Math.floor(nextMonth / 12);
+        const nextMonthIndex = nextMonth % 12;
+        const nextMonthDate = new Date(nextYear, nextMonthIndex, 1);
+        const nextMonthEnd = new Date(
+          nextYear,
+          nextMonthIndex + 1,
+          0,
+          23,
+          59,
+          59,
+          999,
+        );
+
+        console.log(`      📅 Next month: ${nextMonthIndex + 1}/${nextYear}`);
+        console.log(`      📅 Checking for existing bill in next month...`);
+
+        // Get vehicle ID for matching
+        const vehicleId = bill.vehicle?._id || bill.vehicle;
+
+        // Check if bill already exists for this customer/vehicle in next month
+        const existingNextMonthBill = await PaymentsModel.findOne({
+          customer: bill.customer._id || bill.customer,
+          "vehicle._id": vehicleId,
+          isDeleted: false,
+          onewash: false,
+          createdAt: {
+            $gte: nextMonthDate,
+            $lte: nextMonthEnd,
+          },
+        }).lean();
+
+        if (existingNextMonthBill) {
+          console.log(
+            `      ⚠️  Bill already exists for next month: ${existingNextMonthBill._id}`,
+          );
+          console.log(
+            `      🔄 Updating existing bill with carried forward balance...`,
+          );
+
+          // Update existing bill with carried forward balance
+          const updatedOldBalance =
+            existingNextMonthBill.old_balance + bill.balance;
+          const updatedTotalAmount =
+            existingNextMonthBill.amount_charged + updatedOldBalance;
+          const updatedBalance =
+            updatedTotalAmount - existingNextMonthBill.amount_paid;
+
+          await PaymentsModel.updateOne(
+            { _id: existingNextMonthBill._id },
+            {
+              $set: {
+                old_balance: updatedOldBalance,
+                total_amount: updatedTotalAmount,
+                balance: updatedBalance,
+                updatedBy: userInfo._id,
+                updatedAt: new Date(),
+              },
+            },
+          );
+
+          console.log(`      ✅ Updated existing bill:`);
+          console.log(
+            `         Old Balance: ₹${existingNextMonthBill.old_balance} → ₹${updatedOldBalance}`,
+          );
+          console.log(
+            `         Total Amount: ₹${existingNextMonthBill.total_amount} → ₹${updatedTotalAmount}`,
+          );
+          console.log(
+            `         Balance: ₹${existingNextMonthBill.balance} → ₹${updatedBalance}`,
+          );
+        } else {
+          console.log(`      ✅ No existing bill found, creating new one...`);
+
+          // Get current subscription amount
+          const currentCharge = bill.amount_charged || 0;
+
+          const newBill = {
+            customer: bill.customer._id || bill.customer,
+            worker: bill.worker,
+            building: bill.building,
+            vehicle: bill.vehicle,
+            amount_charged: currentCharge,
+            old_balance: bill.balance,
+            total_amount: currentCharge + bill.balance,
+            amount_paid: 0,
+            balance: currentCharge + bill.balance,
+            status: "pending",
+            settled: "pending",
+            onewash: false,
+            createdAt: nextMonthDate,
+            createdBy: userInfo._id,
+            updatedBy: userInfo._id,
+          };
+
+          console.log(`      💰 New bill details:`);
+          console.log(`         Amount Charged: ₹${newBill.amount_charged}`);
+          console.log(
+            `         Old Balance (Carried): ₹${newBill.old_balance}`,
+          );
+          console.log(`         Total Amount: ₹${newBill.total_amount}`);
+          console.log(`         Balance: ₹${newBill.balance}`);
+
+          const savedBill = await new PaymentsModel(newBill).save();
+          newBillsCount++;
+          console.log(`      ✅ New bill created: ${savedBill._id}`);
+        }
+      } catch (err) {
+        console.error(
+          `❌ [SERVICE] Error processing bill ${bill._id}:`,
+          err.message,
+        );
+      }
+    }
+
+    console.log("\n✅ ========== MONTH-END CLOSE SUMMARY ==========");
+    console.log(`   📊 Bills Closed: ${closedCount}`);
+    console.log(`   📊 New Bills Created: ${newBillsCount}`);
+    console.log(
+      `   ⏱️  Completed at: ${new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST`,
+    );
+    console.log(
+      "🔵 ========== [BACKEND] MONTH-END CLOSE SERVICE COMPLETE ==========\n",
+    );
+
+    return {
+      closedBills: closedCount,
+      newBills: newBillsCount,
+    };
+  } catch (error) {
+    console.error("❌ [SERVICE] Month-End Close Failed:", error);
+    throw error;
+  }
+};
+
+// ✅ Revert Month-End Closing Service
+service.revertMonthClose = async (userInfo, month, year) => {
+  console.log(
+    "\n🟠 ========== [BACKEND] REVERT MONTH-END CLOSE SERVICE STARTED ==========",
+  );
+  console.log(`👤 User: ${userInfo.name} (${userInfo.role})`);
+  console.log(
+    `📅 Target Month to Revert: ${month + 1}/${year} (Month index: ${month})`,
+  );
+
+  try {
+    // Start and end of target month
+    const monthStart = new Date(year, month, 1);
+    const monthEnd = new Date(year, month + 1, 0, 23, 59, 59, 999);
+
+    // Start and end of NEXT month (where new bills were created)
+    const nextMonthStart = new Date(year, month + 1, 1);
+    const nextMonthEnd = new Date(year, month + 2, 0, 23, 59, 59, 999);
+
+    console.log("\n📅 Date Ranges:");
+    console.log(
+      `   Target Month: ${monthStart.toISOString()} to ${monthEnd.toISOString()}`,
+    );
+    console.log(
+      `   Target Month (IST): ${monthStart.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} to ${monthEnd.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
+    );
+    console.log(
+      `   Next Month: ${nextMonthStart.toISOString()} to ${nextMonthEnd.toISOString()}`,
+    );
+    console.log(
+      `   Next Month (IST): ${nextMonthStart.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} to ${nextMonthEnd.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
+    );
+
+    // Step 1: Find and delete new bills created in next month with old_balance > 0
+    console.log(
+      "\n🔍 Step 1: Finding new bills to delete (from next month)...",
+    );
+    console.log("   Query Criteria:");
+    console.log("   - isDeleted: false");
+    console.log("   - onewash: false");
+    console.log("   - old_balance: > 0 (carried forward)");
+    console.log(`   - createdAt: $gte ${nextMonthStart.toISOString()}`);
+    console.log(`   - createdAt: $lte ${nextMonthEnd.toISOString()}`);
+
+    const newBillsToDelete = await PaymentsModel.find({
+      isDeleted: false,
+      onewash: false,
+      old_balance: { $gt: 0 },
+      createdAt: {
+        $gte: nextMonthStart,
+        $lte: nextMonthEnd,
+      },
+    }).lean();
+
+    console.log(`\n🗑️ Found ${newBillsToDelete.length} new bills to delete`);
+    if (newBillsToDelete.length > 0) {
+      console.log("\n📋 Bills to Delete:");
+      newBillsToDelete.forEach((bill, idx) => {
+        console.log(`   ${idx + 1}. Bill ID: ${bill._id}`);
+        console.log(`      Old Balance: ₹${bill.old_balance}`);
+        console.log(`      Total: ₹${bill.total_amount}`);
+        console.log(
+          `      Created: ${new Date(bill.createdAt).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
+        );
+      });
+    }
+
+    let deletedCount = 0;
+    let reopenedCount = 0;
+
+    // Delete new bills
+    console.log("\n🗑️ Deleting new bills...");
+    for (const newBill of newBillsToDelete) {
+      try {
+        console.log(
+          `   Deleting bill ${deletedCount + 1}/${newBillsToDelete.length}: ${newBill._id}`,
+        );
+        await PaymentsModel.updateOne(
+          { _id: newBill._id },
+          {
+            $set: {
+              isDeleted: true,
+              deletedBy: userInfo._id,
+              deletedAt: new Date(),
+            },
+          },
+        );
+        deletedCount++;
+        console.log(`   ✅ Deleted successfully`);
+      } catch (err) {
+        console.error(`   ❌ Error deleting bill ${newBill._id}:`, err.message);
+      }
+    }
+
+    // Step 2: Find and reopen closed bills from target month
+    console.log(
+      "\n🔍 Step 2: Finding closed bills to reopen (from target month)...",
+    );
+    console.log("   Query Criteria:");
+    console.log("   - isDeleted: false");
+    console.log("   - onewash: false");
+    console.log("   - status: completed");
+    console.log("   - balance: > 0 (had unpaid balance)");
+    console.log(`   - createdAt: $gte ${monthStart.toISOString()}`);
+    console.log(`   - createdAt: $lte ${monthEnd.toISOString()}`);
+    console.log(
+      `   - updatedAt: $gte ${monthStart.toISOString()} (closed recently)`,
+    );
+
+    const closedBills = await PaymentsModel.find({
+      isDeleted: false,
+      onewash: false,
+      status: "completed",
+      balance: { $gt: 0 }, // Had unpaid balance when closed
+      createdAt: {
+        $gte: monthStart,
+        $lte: monthEnd,
+      },
+      updatedAt: {
+        // Find bills that were updated (closed) recently
+        $gte: monthStart, // Closed during or after target month
+      },
+    }).lean();
+
+    console.log(`\n🔓 Found ${closedBills.length} closed bills to reopen`);
+    if (closedBills.length > 0) {
+      console.log("\n📋 Bills to Reopen:");
+      closedBills.forEach((bill, idx) => {
+        console.log(`   ${idx + 1}. Bill ID: ${bill._id}`);
+        console.log(`      Balance: ₹${bill.balance}`);
+        console.log(`      Status: ${bill.status}`);
+        console.log(
+          `      Created: ${new Date(bill.createdAt).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
+        );
+      });
+    }
+
+    // Reopen bills back to pending status
+    console.log("\n🔓 Reopening bills...");
+    for (const bill of closedBills) {
+      try {
+        console.log(
+          `   Reopening bill ${reopenedCount + 1}/${closedBills.length}: ${bill._id}`,
+        );
+        await PaymentsModel.updateOne(
+          { _id: bill._id },
+          {
+            $set: {
+              status: "pending", // Reopen to pending
+              updatedBy: userInfo._id,
+              updatedAt: new Date(),
+            },
+          },
+        );
+        reopenedCount++;
+        console.log(`   ✅ Reopened successfully (status: pending)`);
+      } catch (err) {
+        console.error(`   ❌ Error reopening bill ${bill._id}:`, err.message);
+      }
+    }
+
+    console.log("\n✅ ========== REVERT MONTH-END CLOSE SUMMARY ==========");
+    console.log(`   📊 New Bills Deleted: ${deletedCount}`);
+    console.log(`   📊 Old Bills Reopened: ${reopenedCount}`);
+    console.log(
+      `   ⏱️  Completed at: ${new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST`,
+    );
+    console.log("🟠 ========== [BACKEND] REVERT SERVICE COMPLETE ==========\n");
+
+    return {
+      deletedBills: deletedCount,
+      reopenedBills: reopenedCount,
+    };
+  } catch (error) {
+    console.error("❌ [SERVICE] Revert Month Close Failed:", error);
+    throw error;
+  }
+};
+
+// ✅ Get Months with Pending Bills
+service.getMonthsWithPending = async () => {
+  console.log("🔵 [SERVICE] Getting months with bills (pending AND completed)");
+
+  try {
+    // Count ALL bills (pending + completed with balance)
+    const totalCount = await PaymentsModel.countDocuments({
+      isDeleted: false,
+      onewash: false,
+      status: { $in: ["pending", "completed"] },
+    });
+    console.log(`📊 [SERVICE] Total bills: ${totalCount}`);
+
+    if (totalCount === 0) {
+      console.log("ℹ️ [SERVICE] No bills found");
+      return [];
+    }
+
+    // Aggregate ALL bills (pending + completed) by month/year/status
+    console.log("🔄 [SERVICE] Running aggregate query...");
+    const result = await PaymentsModel.aggregate([
+      {
+        $match: {
+          isDeleted: false,
+          onewash: false,
+          status: { $in: ["pending", "completed"] },
+        },
+      },
+      {
+        $addFields: {
+          // Add 5.5 hours to UTC to get IST, then extract year/month
+          istDate: { $add: ["$createdAt", 5.5 * 60 * 60 * 1000] },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$istDate" },
+            month: { $month: "$istDate" },
+            status: "$status",
+          },
+          count: { $sum: 1 },
+          totalBalance: { $sum: "$balance" },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            year: "$_id.year",
+            month: "$_id.month",
+          },
+          statuses: {
+            $push: {
+              status: "$_id.status",
+              count: "$count",
+              balance: "$totalBalance",
+            },
+          },
+          totalCount: { $sum: "$count" },
+          totalBalance: { $sum: "$totalBalance" },
+        },
+      },
+      {
+        $sort: { "_id.year": -1, "_id.month": -1 },
+      },
+    ]);
+
+    console.log(`📦 [SERVICE] Aggregate returned ${result.length} groups`);
+
+    // Convert to more readable format
+    const months = result.map((item) => {
+      const pendingGroup = item.statuses.find((s) => s.status === "pending");
+      const completedGroup = item.statuses.find(
+        (s) => s.status === "completed",
+      );
+
+      const pendingCount = pendingGroup?.count || 0;
+      const completedCount = completedGroup?.count || 0;
+
+      return {
+        month: item._id.month - 1, // Convert to 0-indexed (0 = Jan, 11 = Dec)
+        year: item._id.year,
+        pending: pendingCount,
+        completed: completedCount,
+        count: item.totalCount,
+        totalBalance: Math.round(item.totalBalance),
+        isClosed: pendingCount === 0 && completedCount > 0,
+      };
+    });
+
+    console.log(`📅 [SERVICE] Found ${months.length} months`);
+    months.forEach((m) => {
+      const monthName = new Date(m.year, m.month, 1).toLocaleDateString(
+        "en-US",
+        { month: "long", year: "numeric" },
+      );
+      const status = m.isClosed ? "✅ CLOSED" : "⏳ OPEN";
+      console.log(
+        `   ${status} ${monthName}: ${m.pending} pending, ${m.completed} completed, ₹${m.totalBalance} balance`,
+      );
+    });
+
+    return months;
+  } catch (error) {
+    console.error("❌ [SERVICE] Get Months Failed:");
+    console.error("Error name:", error.name);
+    console.error("Error message:", error.message);
+    console.error("Error stack:", error.stack);
+    throw new Error(
+      `Failed to get months with bills: ${error.message || error}`,
+    );
+  }
+};
+
 // ✅ UPDATED MONTHLY STATEMENT (View + Excel + PDF Support)
 service.monthlyStatement = async (userInfo, query) => {
   console.log("🔵 [BACKEND] monthlyStatement started");
@@ -1020,4 +1599,195 @@ service.monthlyStatement = async (userInfo, query) => {
   });
 
   return workbook;
+};
+
+service.generatePDF = async (userInfo, filters) => {
+  console.log("📄 Generating PDF with filters:", filters);
+
+  const PDFDocument = require("pdfkit-table");
+  const moment = require("moment-timezone");
+  const path = require("path");
+  const fs = require("fs");
+
+  // Fetch ALL records (no pagination limit)
+  const allFilters = {
+    ...filters,
+    page: 1,
+    limit: 100000, // Get all records
+  };
+
+  const result = await service.list(userInfo, allFilters);
+  const payments = result.data || [];
+
+  console.log(`📊 Fetched ${payments.length} total records for PDF`);
+
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        layout: "landscape",
+        size: "A4",
+        margin: 40,
+        bufferPages: true,
+      });
+
+      const chunks = [];
+      doc.on("data", (chunk) => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
+
+      // Add logo
+      const logoPath = path.join(
+        __dirname,
+        "../../../../../admin-panel/public/logo-icon.png",
+      );
+      if (fs.existsSync(logoPath)) {
+        doc.image(logoPath, 40, 30, { width: 50, height: 50 });
+      }
+
+      // Title with gradient effect (blue)
+      doc
+        .fontSize(22)
+        .font("Helvetica-Bold")
+        .fillColor("#1e40af")
+        .text("Residence Payments Report", 110, 40, { align: "left" });
+
+      doc.moveDown(1.5);
+
+      // Decorative line
+      doc
+        .strokeColor("#3b82f6")
+        .lineWidth(2)
+        .moveTo(40, doc.y)
+        .lineTo(doc.page.width - 40, doc.y)
+        .stroke();
+
+      doc.moveDown(0.5);
+
+      // Date range and stats (NO BOX, just text)
+      doc.fontSize(10).font("Helvetica").fillColor("#374151");
+      const startDate = filters.startDate
+        ? moment(filters.startDate).format("DD/MM/YYYY")
+        : "N/A";
+      const endDate = filters.endDate
+        ? moment(filters.endDate).format("DD/MM/YYYY")
+        : "N/A";
+
+      doc.text(`Date Range: ${startDate} to ${endDate}`, 40, doc.y);
+      doc.text(`Total Records: ${payments.length}`, 40, doc.y + 15);
+      doc.text(
+        `Total Revenue: ${result.stats?.totalAmount || 0} AED`,
+        40,
+        doc.y + 30,
+      );
+
+      doc.moveDown(4);
+
+      // Prepare table rows (removed customer name, keeping only mobile)
+      const tableRows = payments.map((payment) => {
+        const mobile = payment.customer?.mobile || "-";
+        const vehicleReg = payment.vehicle?.registration_no || "-";
+        const parkingNo = payment.vehicle?.parking_no || "-";
+        const billDate = moment(payment.createdAt).format("DD/MM/YYYY");
+
+        // Extract carried forward amount from notes
+        let carriedAmount = "-";
+        const isMonthEndClosed =
+          payment.notes &&
+          payment.notes.toLowerCase().includes("closed by month-end");
+        if (isMonthEndClosed && payment.notes) {
+          const match = payment.notes.match(
+            /Carried Forward:\s*([\d.]+)\s*AED/i,
+          );
+          if (match) {
+            carriedAmount = match[1];
+          }
+        }
+
+        // Paid date
+        let paidDate = "Not Paid";
+        if (payment.collectedDate) {
+          paidDate = moment(payment.collectedDate).format("DD/MM/YYYY");
+        }
+
+        return [
+          String(payment.id || "-"),
+          mobile,
+          vehicleReg,
+          parkingNo,
+          billDate,
+          String(payment.amount_charged || 0),
+          String(payment.old_balance || 0),
+          String(payment.total_amount || 0),
+          String(payment.amount_paid || 0),
+          carriedAmount,
+          String(payment.balance || 0),
+          paidDate,
+          (payment.status || "pending").toUpperCase(),
+        ];
+      });
+
+      // Create table data (removed Customer column)
+      const tableData = {
+        headers: [
+          "ID",
+          "Mobile",
+          "Vehicle",
+          "Parking",
+          "Bill Date",
+          "Subscription",
+          "Previous Due",
+          "Total Due",
+          "Paid",
+          "Carried Fwd",
+          "Balance",
+          "Paid Date",
+          "Status",
+        ],
+        rows: tableRows,
+      };
+
+      // Render table with clean styling
+      doc.table(tableData, {
+        prepareHeader: () => {
+          doc.font("Helvetica-Bold").fontSize(8).fillColor("#1e40af");
+        },
+        prepareRow: (row, indexColumn, indexRow) => {
+          doc.font("Helvetica").fontSize(7).fillColor("#1f2937");
+        },
+        columnSpacing: 5,
+        padding: 5,
+        width: doc.page.width - 80,
+        x: 40,
+      });
+
+      // Add colorful footer to all pages
+      const range = doc.bufferedPageRange();
+      const generatedText = `Generated on ${moment().format("DD/MM/YYYY HH:mm:ss")}`;
+
+      for (let i = range.start; i < range.start + range.count; i++) {
+        doc.switchToPage(i);
+
+        // Simple footer line
+        doc
+          .strokeColor("#3b82f6")
+          .lineWidth(1)
+          .moveTo(40, doc.page.height - 35)
+          .lineTo(doc.page.width - 40, doc.page.height - 35)
+          .stroke();
+
+        doc.fontSize(8).fillColor("#1e40af").font("Helvetica");
+        doc.text(
+          `${generatedText} | Page ${i - range.start + 1} of ${range.count} | BCW Car Wash Services`,
+          40,
+          doc.page.height - 28,
+          { align: "center", width: doc.page.width - 80 },
+        );
+      }
+
+      doc.end();
+    } catch (error) {
+      console.error("❌ PDF Generation Error:", error);
+      reject(error);
+    }
+  });
 };

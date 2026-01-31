@@ -481,7 +481,9 @@ service.vehicleActivate = async (userInfo, id, payload) => {
     {
       $set: {
         "vehicles.$.status": 1,
-        "vehicles.$.start_date": payload.start_date,
+        "vehicles.$.start_date": payload.start_date || new Date(),
+        "vehicles.$.restart_date":
+          payload.restart_date || payload.start_date || new Date(),
         "vehicles.$.activatedBy": userInfo._id,
       },
       $unset: {
@@ -1083,9 +1085,6 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
   for (const row of excelData) {
     try {
       // Validate required fields
-      if (!row.firstName) {
-        throw new Error("First Name is required");
-      }
       if (!row.registration_no) {
         throw new Error("Vehicle Registration No is required");
       }
@@ -1100,7 +1099,8 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       let mobile = row.mobile;
       if (!mobile || mobile.trim() === "") {
         // Check if we already generated a mobile for this customer in this batch
-        const customerKey = `${row.firstName}-${row.lastName}`.toLowerCase();
+        const customerKey =
+          `${row.firstName || "Customer"}-${row.lastName || ""}`.toLowerCase();
         if (
           customerGroups.has(customerKey) &&
           customerGroups.get(customerKey).mobile
@@ -1109,7 +1109,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         } else {
           mobile = await generateAutoMobile();
           console.log(
-            `📱 Auto-generated mobile: ${mobile} for ${row.firstName}`,
+            `📱 Auto-generated mobile: ${mobile} for ${row.firstName || "Customer"}`,
           );
         }
       }
@@ -1118,8 +1118,8 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       if (!customerGroups.has(mobile)) {
         customerGroups.set(mobile, {
           mobile,
-          firstName: row.firstName,
-          lastName: row.lastName,
+          firstName: row.firstName || "",
+          lastName: row.lastName || "",
           email: row.email,
           vehicles: [],
         });
@@ -1139,12 +1139,12 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       });
     } catch (err) {
       console.error(
-        `❌ Row ${row.rowNumber} Error (${row.firstName}):`,
+        `❌ Row ${row.rowNumber} Error (${row.firstName || "Customer"}):`,
         err.message,
       );
       results.errors.push({
         row: row.rowNumber,
-        name: `${row.firstName} ${row.lastName}`,
+        name: `${row.firstName || "Customer"} ${row.lastName || ""}`,
         error: err.message,
       });
     }
@@ -1157,12 +1157,20 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       let customer = await CustomersModel.findOne({ mobile: mobile });
 
       if (customer) {
-        console.log(`🔄 Updating existing customer: ${customerData.firstName}`);
+        console.log(
+          `🔄 Updating existing customer: ${customerData.firstName || "Customer"}`,
+        );
 
-        // Update customer basic info (keep existing building/location)
-        customer.firstName = customerData.firstName;
-        customer.lastName = customerData.lastName || "";
-        customer.email = customerData.email || "";
+        // Update customer basic info (keep existing building/location) - only if firstName provided
+        if (customerData.firstName) {
+          customer.firstName = customerData.firstName;
+        }
+        if (customerData.lastName) {
+          customer.lastName = customerData.lastName;
+        }
+        if (customerData.email) {
+          customer.email = customerData.email;
+        }
 
         // Add new vehicles (skip duplicates by registration_no)
         for (const newVehicle of customerData.vehicles) {
@@ -1184,7 +1192,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
 
         customer.updatedBy = userInfo._id;
         await CustomersModel.updateOne({ _id: customer._id }, customer);
-        results.updated++;
+        results.updated++; // Count customers updated
       } else {
         console.log(
           `➕ Creating new customer: ${customerData.firstName} with ${customerData.vehicles.length} vehicle(s)`,
@@ -1206,7 +1214,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         };
 
         await new CustomersModel(newCustomer).save();
-        results.created++;
+        results.created++; // Count customers created
       }
 
       results.success += customerData.vehicles.length;

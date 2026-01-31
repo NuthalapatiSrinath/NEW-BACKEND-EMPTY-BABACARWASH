@@ -4,6 +4,27 @@ const AuthHelper = require("../auth/auth.helper");
 
 router.get("/", AuthHelper.authenticate, controller.list);
 router.post("/", AuthHelper.authenticate, controller.create);
+
+// GET routes with specific paths MUST come before /:id to avoid conflicts
+router.get(
+  "/months-with-pending",
+  AuthHelper.authenticate,
+  controller.getMonthsWithPending,
+);
+router.get("/export/pdf", AuthHelper.authenticate, controller.exportPDF);
+router.get(
+  "/settlements/list",
+  AuthHelper.authenticate,
+  controller.settlements,
+);
+router.get("/export/list", AuthHelper.authenticate, controller.exportData);
+router.get(
+  "/export/statement/monthly",
+  AuthHelper.authenticate,
+  controller.monthlyStatement,
+);
+
+// Parameterized routes come after specific routes
 router.get("/:id", AuthHelper.authenticate, controller.info);
 router.put("/:id", AuthHelper.authenticate, controller.update);
 router.delete("/:id", AuthHelper.authenticate, controller.delete);
@@ -14,30 +35,25 @@ router.put("/:id/collect", AuthHelper.authenticate, controller.collectPayment);
 router.put(
   "/collect/settle",
   AuthHelper.authenticate,
-  controller.settlePayment
-);
-router.get(
-  "/settlements/list",
-  AuthHelper.authenticate,
-  controller.settlements
+  controller.settlePayment,
 );
 router.put(
   "/settlements/:id",
   AuthHelper.authenticate,
-  controller.updateSettlements
+  controller.updateSettlements,
 );
 
 router.put(
   "/bulk/status",
   AuthHelper.authenticate,
-  controller.bulkUpdateStatus
+  controller.bulkUpdateStatus,
 );
 
-router.get("/export/list", AuthHelper.authenticate, controller.exportData);
-router.get(
-  "/export/statement/monthly",
+router.post("/close-month", AuthHelper.authenticate, controller.closeMonth);
+router.post(
+  "/revert-month-close",
   AuthHelper.authenticate,
-  controller.monthlyStatement
+  controller.revertMonthClose,
 );
 
 module.exports = router;

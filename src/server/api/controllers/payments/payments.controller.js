@@ -237,3 +237,109 @@ controller.bulkUpdateStatus = async (req, res) => {
       .json({ message: "Internal server error", error: error.message });
   }
 };
+
+controller.closeMonth = async (req, res) => {
+  try {
+    const { user } = req;
+    const { month, year } = req.body;
+    console.log("🔵 [CONTROLLER] Month-End Close Request");
+    console.log("👤 User:", user.name, user.role);
+    console.log("📅 Month:", month, "Year:", year);
+
+    const result = await service.closeMonth(user, month, year);
+
+    console.log("✅ [CONTROLLER] Month-End Close Success");
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Month closed successfully",
+      closedBills: result.closedBills,
+      newBills: result.newBills,
+    });
+  } catch (error) {
+    console.error("❌ [CONTROLLER] Month-End Close Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to close month", error: error.message });
+  }
+};
+
+controller.revertMonthClose = async (req, res) => {
+  try {
+    const { user } = req;
+    const { month, year } = req.body;
+    console.log("🔵 [CONTROLLER] Revert Month-End Close Request");
+    console.log("👤 User:", user.name, user.role);
+    console.log("📅 Month:", month, "Year:", year);
+
+    const result = await service.revertMonthClose(user, month, year);
+
+    console.log("✅ [CONTROLLER] Revert Success");
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Month closure reverted successfully",
+      deletedBills: result.deletedBills,
+      reopenedBills: result.reopenedBills,
+    });
+  } catch (error) {
+    console.error("❌ [CONTROLLER] Revert Month Close Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to revert month close", error: error.message });
+  }
+};
+
+controller.getMonthsWithPending = async (req, res) => {
+  try {
+    const { user } = req;
+    console.log("🔵 [CONTROLLER] Get Months with Pending Bills");
+    console.log("👤 User:", user.name, user.role);
+
+    const result = await service.getMonthsWithPending();
+    console.log("📦 [CONTROLLER] Service returned:", result);
+
+    console.log(
+      "✅ [CONTROLLER] Found",
+      result.length,
+      "months with pending bills",
+    );
+    return res.status(200).json({
+      statusCode: 200,
+      months: result,
+    });
+  } catch (error) {
+    console.error("❌ [CONTROLLER] Get Months Error:", error);
+    console.error("❌ Stack:", error.stack);
+    return res
+      .status(500)
+      .json({ message: "Failed to fetch months", error: error.message });
+  }
+};
+
+controller.exportPDF = async (req, res) => {
+  try {
+    const { user, query } = req;
+    console.log("📄 [CONTROLLER] PDF Export requested");
+    console.log("Query filters:", query);
+
+    const pdfBuffer = await service.generatePDF(user, query);
+
+    // Set headers for PDF download
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=residence_payments_${new Date().toISOString().split("T")[0]}.pdf`,
+    );
+    res.setHeader("Content-Length", pdfBuffer.length);
+
+    console.log(
+      "✅ [CONTROLLER] PDF generated successfully, size:",
+      pdfBuffer.length,
+    );
+    return res.send(pdfBuffer);
+  } catch (error) {
+    console.error("❌ [CONTROLLER] PDF Export Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Failed to generate PDF", error: error.message });
+  }
+};

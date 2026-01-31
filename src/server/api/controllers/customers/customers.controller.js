@@ -390,7 +390,7 @@ controller.downloadTemplate = async (req, res) => {
     const worksheet = workbook.addWorksheet("Customers Template");
 
     worksheet.columns = [
-      { header: "First Name*", key: "firstName", width: 20 },
+      { header: "First Name", key: "firstName", width: 20 },
       { header: "Last Name", key: "lastName", width: 20 },
       { header: "Mobile (Optional)", key: "mobile", width: 15 },
       { header: "Email", key: "email", width: 25 },
