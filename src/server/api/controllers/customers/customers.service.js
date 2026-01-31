@@ -85,6 +85,35 @@ service.list = async (userInfo, query) => {
   // Count Total
   const total = await CustomersModel.countDocuments(findQuery);
 
+  console.log(`📊 [CUSTOMER LIST] Query: ${JSON.stringify(findQuery)}`);
+  console.log(`📊 [CUSTOMER LIST] Total matching customers: ${total}`);
+
+  // Debug: Check what's actually in the DB
+  const allCustomers = await CustomersModel.countDocuments({});
+  const notDeletedCustomers = await CustomersModel.countDocuments({
+    isDeleted: false,
+  });
+  console.log(
+    `🔍 [DEBUG] Total in DB: ${allCustomers}, Not Deleted: ${notDeletedCustomers}`,
+  );
+
+  // Check specific status values
+  const status1Count = await CustomersModel.countDocuments({
+    isDeleted: false,
+    status: 1,
+  });
+  const status2Count = await CustomersModel.countDocuments({
+    isDeleted: false,
+    status: 2,
+  });
+  const statusStringCount = await CustomersModel.countDocuments({
+    isDeleted: false,
+    status: "1",
+  });
+  console.log(
+    `📊 [DEBUG] Status counts - Number(1): ${status1Count}, Number(2): ${status2Count}, String("1"): ${statusStringCount}`,
+  );
+
   // Fetch Data
   let data = await CustomersModel.find(findQuery)
     .sort({ _id: -1 })
@@ -1209,7 +1238,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
 
       if (customer) {
         console.log(
-          `🔄 Updating existing customer: ${customerData.firstName || "Customer"}`,
+          `🔄 Updating existing customer: ${customerData.firstName || "Customer"} (Mobile: ${mobile})`,
         );
 
         // Update customer basic info (keep existing building/location) - only if firstName provided
@@ -1223,31 +1252,111 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
           customer.email = customerData.email;
         }
 
-        // Add new vehicles (skip duplicates by registration_no)
+        // ✅ FIX: Ensure customer status is active during import
+        // This prevents imported customers from being hidden if they were previously deactivated
+        console.log(
+          `  📝 Setting status from ${customer.status} to 1 for mobile: ${mobile}`,
+        );
+        customer.status = 1;
+        customer.isDeleted = false; // ✅ CRITICAL FIX: Undelete customers during import
+
+        // Process each vehicle: check globally and handle duplicates/transfers
         for (const newVehicle of customerData.vehicles) {
-          const vehicleExists = customer.vehicles.some(
+          // Check if vehicle exists in THIS customer's vehicles
+          const vehicleExistsInCurrentCustomer = customer.vehicles.some(
             (v) =>
               v.registration_no.toLowerCase() ===
               newVehicle.registration_no.toLowerCase(),
           );
 
-          if (!vehicleExists) {
-            customer.vehicles.push(newVehicle);
-            console.log(`  ➕ Added vehicle: ${newVehicle.registration_no}`);
-          } else {
+          if (vehicleExistsInCurrentCustomer) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists, skipped`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists for this mobile, skipped`,
             );
+            continue;
+          }
+
+          // Check if vehicle exists with a DIFFERENT customer (globally)
+          const otherCustomerWithVehicle = await CustomersModel.findOne({
+            mobile: { $ne: mobile }, // Different mobile number
+            "vehicles.registration_no": {
+              $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+            },
+          });
+
+          if (otherCustomerWithVehicle) {
+            console.log(
+              `  🔄 Vehicle ${newVehicle.registration_no} found with different customer (Mobile: ${otherCustomerWithVehicle.mobile}), transferring...`,
+            );
+
+            // Remove from old customer
+            otherCustomerWithVehicle.vehicles =
+              otherCustomerWithVehicle.vehicles.filter(
+                (v) =>
+                  v.registration_no.toLowerCase() !==
+                  newVehicle.registration_no.toLowerCase(),
+              );
+            await otherCustomerWithVehicle.save();
+
+            // Add to current customer
+            customer.vehicles.push(newVehicle);
+            console.log(
+              `  ✅ Vehicle ${newVehicle.registration_no} transferred successfully`,
+            );
+          } else {
+            // Vehicle doesn't exist anywhere, add it
+            customer.vehicles.push(newVehicle);
+            console.log(`  ➕ Added new vehicle: ${newVehicle.registration_no}`);
           }
         }
 
         customer.updatedBy = userInfo._id;
-        await CustomersModel.updateOne({ _id: customer._id }, customer);
+        await customer.save(); // ✅ FIX: Use .save() instead of updateOne with document object
+        console.log(
+          `  ✅ Customer saved. Final status: ${customer.status}, ID: ${customer._id}`,
+        );
         results.updated++; // Count customers updated
       } else {
         console.log(
-          `➕ Creating new customer: ${customerData.firstName} with ${customerData.vehicles.length} vehicle(s)`,
+          `➕ Creating new customer: ${customerData.firstName} (Mobile: ${mobile}) with ${customerData.vehicles.length} vehicle(s)`,
         );
+
+        // Before creating new customer, check if any vehicles exist with other customers
+        const vehiclesToAdd = [];
+        for (const newVehicle of customerData.vehicles) {
+          // Check if vehicle exists with ANY customer
+          const otherCustomerWithVehicle = await CustomersModel.findOne({
+            "vehicles.registration_no": {
+              $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+            },
+          });
+
+          if (otherCustomerWithVehicle) {
+            console.log(
+              `  🔄 Vehicle ${newVehicle.registration_no} found with customer (Mobile: ${otherCustomerWithVehicle.mobile}), transferring...`,
+            );
+
+            // Remove from old customer
+            otherCustomerWithVehicle.vehicles =
+              otherCustomerWithVehicle.vehicles.filter(
+                (v) =>
+                  v.registration_no.toLowerCase() !==
+                  newVehicle.registration_no.toLowerCase(),
+              );
+            await otherCustomerWithVehicle.save();
+
+            vehiclesToAdd.push(newVehicle);
+            console.log(
+              `  ✅ Vehicle ${newVehicle.registration_no} will be transferred to new customer`,
+            );
+          } else {
+            // Vehicle doesn't exist, add it
+            vehiclesToAdd.push(newVehicle);
+            console.log(
+              `  ➕ Vehicle ${newVehicle.registration_no} will be added as new`,
+            );
+          }
+        }
 
         const id = await CounterService.id("customers");
         const newCustomer = {
@@ -1259,8 +1368,9 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
           flat_no: "",
           building: null,
           location: null,
-          vehicles: customerData.vehicles,
+          vehicles: vehiclesToAdd,
           status: 1,
+          isDeleted: false, // ✅ Ensure new customers are not deleted
           createdBy: userInfo._id,
         };
 
