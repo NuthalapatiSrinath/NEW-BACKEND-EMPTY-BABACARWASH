@@ -50,7 +50,7 @@ service.list = async (userInfo, rawQuery) => {
 
   const findQuery = {
     isDeleted: false,
-    worker: { $ne: "" },
+    // worker: { $ne: "" }, // Allow jobs without workers (will be assigned later)
     customer: { $ne: "" },
     building: { $ne: "" },
 
