@@ -53,7 +53,7 @@ cron.run = async () => {
           amount_paid: 0,
           total_amount: totalAmount,
           old_balance: balance,
-          balance: totalAmount, // ✅ FIX: balance = total_amount - amount_paid (which is 0 initially)
+          balance: totalAmount, // ✅ FIX: balance = total_amount - amount_poisaid (which is 0 initially)
           location: iterator.location,
           building: iterator.building,
           createdBy: "Cron Scheduler",
