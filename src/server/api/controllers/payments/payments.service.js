@@ -303,21 +303,19 @@ service.updatePayment = async (userInfo, id, payload) => {
 service.collectPayment = async (userInfo, id, payload) => {
   const paymentData = await PaymentsModel.findOne({ _id: id }).lean();
 
-  let status =
-    Number(payload.amount) <
-    paymentData.amount_charged - paymentData.amount_paid
-      ? "pending"
-      : "completed";
-  let balance =
-    paymentData.amount_charged +
-    paymentData.old_balance -
-    (paymentData.amount_paid + payload.amount);
+  // Calculate new amounts
+  const newAmountPaid = Number(paymentData.amount_paid + payload.amount);
+  const balance = paymentData.total_amount - newAmountPaid;
+
+  // ✅ FIX: Status should check against total_amount (includes old_balance), not just amount_charged
+  const status =
+    newAmountPaid < paymentData.total_amount ? "pending" : "completed";
 
   await PaymentsModel.updateOne(
     { _id: id },
     {
       $set: {
-        amount_paid: Number(paymentData.amount_paid + payload.amount),
+        amount_paid: newAmountPaid,
         payment_mode: payload.payment_mode,
         balance,
         status,
@@ -899,6 +897,21 @@ service.closeMonth = async (userInfo, month, year) => {
     const targetMonth = month !== undefined ? month : new Date().getMonth();
     const targetYear = year !== undefined ? year : new Date().getFullYear();
 
+    // ✅ VALIDATION: Can only close a month if we're in the next month or later
+    const now = moment.tz("Asia/Dubai");
+    const currentMonth = now.month();
+    const currentYear = now.year();
+
+    // Calculate if target month is current month or future
+    const targetDate = new Date(targetYear, targetMonth, 1);
+    const currentDate = new Date(currentYear, currentMonth, 1);
+
+    if (targetDate >= currentDate) {
+      throw new Error(
+        `Cannot close ${targetMonth + 1}/${targetYear} yet. You can only close this month after ${targetMonth + 2}/${targetYear} starts (after cron creates next month's bills).`,
+      );
+    }
+
     // Start and end of target month
     const monthStart = new Date(targetYear, targetMonth, 1);
     const monthEnd = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59, 999);
@@ -995,7 +1008,7 @@ service.closeMonth = async (userInfo, month, year) => {
           `      ✅ Bill closed successfully - Balance ${closedBalance} carried forward`,
         );
 
-        // 2. Check if next month bill already exists, update it or create new one
+        // 2. Check if next month bill already exists and handle balance carry-forward
         const billDate = new Date(bill.createdAt);
         const nextMonth = billDate.getMonth() + 1;
         const nextYear = billDate.getFullYear() + Math.floor(nextMonth / 12);
@@ -1011,11 +1024,19 @@ service.closeMonth = async (userInfo, month, year) => {
           999,
         );
 
-        console.log(`      📅 Next month: ${nextMonthIndex + 1}/${nextYear}`);
-        console.log(`      📅 Checking for existing bill in next month...`);
+        console.log(
+          `\n      📅 [NEXT MONTH CHECK] Target: ${nextMonthIndex + 1}/${nextYear}`,
+        );
+        console.log(
+          `      📅 Date Range: ${nextMonthDate.toISOString()} to ${nextMonthEnd.toISOString()}`,
+        );
+        console.log(`      💰 Balance to carry forward: ₹${closedBalance}`);
 
         // Get vehicle ID for matching
         const vehicleId = bill.vehicle?._id || bill.vehicle;
+        console.log(
+          `      🔍 Searching for bill: Customer=${bill.customer._id || bill.customer}, Vehicle=${vehicleId}`,
+        );
 
         // Check if bill already exists for this customer/vehicle in next month
         const existingNextMonthBill = await PaymentsModel.findOne({
@@ -1031,78 +1052,104 @@ service.closeMonth = async (userInfo, month, year) => {
 
         if (existingNextMonthBill) {
           console.log(
-            `      ⚠️  Bill already exists for next month: ${existingNextMonthBill._id}`,
+            `\n      ✅ [FOUND] Next month bill exists: ${existingNextMonthBill._id}`,
+          );
+          console.log(`         Current State:`);
+          console.log(
+            `         - Old Balance: ₹${existingNextMonthBill.old_balance}`,
           );
           console.log(
-            `      🔄 Updating existing bill with carried forward balance...`,
+            `         - Amount Charged: ₹${existingNextMonthBill.amount_charged}`,
+          );
+          console.log(
+            `         - Amount Paid: ₹${existingNextMonthBill.amount_paid}`,
+          );
+          console.log(
+            `         - Total Amount: ₹${existingNextMonthBill.total_amount}`,
+          );
+          console.log(`         - Balance: ₹${existingNextMonthBill.balance}`);
+          console.log(
+            `         - Created At: ${new Date(existingNextMonthBill.createdAt).toLocaleString("en-US", { timeZone: "Asia/Dubai" })} Dubai`,
           );
 
-          // Update existing bill with carried forward balance
-          const updatedOldBalance =
-            existingNextMonthBill.old_balance + bill.balance;
-          const updatedTotalAmount =
-            existingNextMonthBill.amount_charged + updatedOldBalance;
-          const updatedBalance =
-            updatedTotalAmount - existingNextMonthBill.amount_paid;
+          // 🔍 CHECK: Did cron already add this balance?
+          // If next month bill's old_balance already equals the balance we're trying to carry forward,
+          // then cron already captured it when it ran. Don't add again!
+          console.log(
+            `\n      🔍 [DUPLICATE CHECK] Checking if cron already added this balance...`,
+          );
+          console.log(`         Balance to add: ₹${closedBalance}`);
+          console.log(
+            `         Next month's old_balance: ₹${existingNextMonthBill.old_balance}`,
+          );
 
-          await PaymentsModel.updateOne(
-            { _id: existingNextMonthBill._id },
-            {
-              $set: {
-                old_balance: updatedOldBalance,
-                total_amount: updatedTotalAmount,
-                balance: updatedBalance,
-                updatedBy: userInfo._id,
-                updatedAt: new Date(),
+          if (existingNextMonthBill.old_balance >= closedBalance) {
+            // Cron already captured the balance
+            console.log(
+              `\n      ✅ [SKIP] Cron already included this balance (${existingNextMonthBill.old_balance} >= ${closedBalance})`,
+            );
+            console.log(
+              `         ⚠️  NOT adding balance again to prevent duplicate`,
+            );
+            console.log(
+              `         ✅ Only marking current month bill as completed`,
+            );
+          } else {
+            // Cron didn't capture full balance (maybe customer paid after cron ran)
+            // Add the difference
+            const balanceDifference =
+              closedBalance - existingNextMonthBill.old_balance;
+            console.log(
+              `\n      ⚠️  [ADD DIFFERENCE] Cron captured ₹${existingNextMonthBill.old_balance} but actual balance is ₹${closedBalance}`,
+            );
+            console.log(`         💰 Adding difference: ₹${balanceDifference}`);
+
+            const updatedOldBalance =
+              existingNextMonthBill.old_balance + balanceDifference;
+            const updatedTotalAmount =
+              existingNextMonthBill.amount_charged + updatedOldBalance;
+            const updatedBalance =
+              updatedTotalAmount - existingNextMonthBill.amount_paid;
+
+            console.log(`         Updating next month bill...`);
+            await PaymentsModel.updateOne(
+              { _id: existingNextMonthBill._id },
+              {
+                $set: {
+                  old_balance: updatedOldBalance,
+                  total_amount: updatedTotalAmount,
+                  balance: updatedBalance,
+                  updatedBy: userInfo._id,
+                  updatedAt: new Date(),
+                },
               },
-            },
-          );
+            );
 
-          console.log(`      ✅ Updated existing bill:`);
-          console.log(
-            `         Old Balance: ₹${existingNextMonthBill.old_balance} → ₹${updatedOldBalance}`,
-          );
-          console.log(
-            `         Total Amount: ₹${existingNextMonthBill.total_amount} → ₹${updatedTotalAmount}`,
-          );
-          console.log(
-            `         Balance: ₹${existingNextMonthBill.balance} → ₹${updatedBalance}`,
-          );
+            console.log(`\n      ✅ [UPDATED] Next month bill updated:`);
+            console.log(
+              `         Old Balance: ₹${existingNextMonthBill.old_balance} → ₹${updatedOldBalance}`,
+            );
+            console.log(
+              `         Total Amount: ₹${existingNextMonthBill.total_amount} → ₹${updatedTotalAmount}`,
+            );
+            console.log(
+              `         Balance: ₹${existingNextMonthBill.balance} → ₹${updatedBalance}`,
+            );
+            newBillsCount++;
+          }
         } else {
-          console.log(`      ✅ No existing bill found, creating new one...`);
-
-          // Get current subscription amount
-          const currentCharge = bill.amount_charged || 0;
-
-          const newBill = {
-            customer: bill.customer._id || bill.customer,
-            worker: bill.worker,
-            building: bill.building,
-            vehicle: bill.vehicle,
-            amount_charged: currentCharge,
-            old_balance: bill.balance,
-            total_amount: currentCharge + bill.balance,
-            amount_paid: 0,
-            balance: currentCharge + bill.balance,
-            status: "pending",
-            settled: "pending",
-            onewash: false,
-            createdAt: nextMonthDate,
-            createdBy: userInfo._id,
-            updatedBy: userInfo._id,
-          };
-
-          console.log(`      💰 New bill details:`);
-          console.log(`         Amount Charged: ₹${newBill.amount_charged}`);
           console.log(
-            `         Old Balance (Carried): ₹${newBill.old_balance}`,
+            `\n      ⚠️  [NOT FOUND] No bill exists for next month yet`,
           );
-          console.log(`         Total Amount: ₹${newBill.total_amount}`);
-          console.log(`         Balance: ₹${newBill.balance}`);
-
-          const savedBill = await new PaymentsModel(newBill).save();
-          newBillsCount++;
-          console.log(`      ✅ New bill created: ${savedBill._id}`);
+          console.log(
+            `      💡 Cron will create next month's bill on ${nextMonthDate.toLocaleDateString()}`,
+          );
+          console.log(
+            `      💡 When cron runs, it will pick up the balance from this closed bill`,
+          );
+          console.log(
+            `      ✅ Current bill closed, cron will handle balance carry-forward`,
+          );
         }
       } catch (err) {
         console.error(
@@ -1132,184 +1179,7 @@ service.closeMonth = async (userInfo, month, year) => {
   }
 };
 
-// ✅ Revert Month-End Closing Service
-service.revertMonthClose = async (userInfo, month, year) => {
-  console.log(
-    "\n🟠 ========== [BACKEND] REVERT MONTH-END CLOSE SERVICE STARTED ==========",
-  );
-  console.log(`👤 User: ${userInfo.name} (${userInfo.role})`);
-  console.log(
-    `📅 Target Month to Revert: ${month + 1}/${year} (Month index: ${month})`,
-  );
-
-  try {
-    // Start and end of target month
-    const monthStart = new Date(year, month, 1);
-    const monthEnd = new Date(year, month + 1, 0, 23, 59, 59, 999);
-
-    // Start and end of NEXT month (where new bills were created)
-    const nextMonthStart = new Date(year, month + 1, 1);
-    const nextMonthEnd = new Date(year, month + 2, 0, 23, 59, 59, 999);
-
-    console.log("\n📅 Date Ranges:");
-    console.log(
-      `   Target Month: ${monthStart.toISOString()} to ${monthEnd.toISOString()}`,
-    );
-    console.log(
-      `   Target Month (IST): ${monthStart.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} to ${monthEnd.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
-    );
-    console.log(
-      `   Next Month: ${nextMonthStart.toISOString()} to ${nextMonthEnd.toISOString()}`,
-    );
-    console.log(
-      `   Next Month (IST): ${nextMonthStart.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} to ${nextMonthEnd.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
-    );
-
-    // Step 1: Find and delete new bills created in next month with old_balance > 0
-    console.log(
-      "\n🔍 Step 1: Finding new bills to delete (from next month)...",
-    );
-    console.log("   Query Criteria:");
-    console.log("   - isDeleted: false");
-    console.log("   - onewash: false");
-    console.log("   - old_balance: > 0 (carried forward)");
-    console.log(`   - createdAt: $gte ${nextMonthStart.toISOString()}`);
-    console.log(`   - createdAt: $lte ${nextMonthEnd.toISOString()}`);
-
-    const newBillsToDelete = await PaymentsModel.find({
-      isDeleted: false,
-      onewash: false,
-      old_balance: { $gt: 0 },
-      createdAt: {
-        $gte: nextMonthStart,
-        $lte: nextMonthEnd,
-      },
-    }).lean();
-
-    console.log(`\n🗑️ Found ${newBillsToDelete.length} new bills to delete`);
-    if (newBillsToDelete.length > 0) {
-      console.log("\n📋 Bills to Delete:");
-      newBillsToDelete.forEach((bill, idx) => {
-        console.log(`   ${idx + 1}. Bill ID: ${bill._id}`);
-        console.log(`      Old Balance: ₹${bill.old_balance}`);
-        console.log(`      Total: ₹${bill.total_amount}`);
-        console.log(
-          `      Created: ${new Date(bill.createdAt).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
-        );
-      });
-    }
-
-    let deletedCount = 0;
-    let reopenedCount = 0;
-
-    // Delete new bills
-    console.log("\n🗑️ Deleting new bills...");
-    for (const newBill of newBillsToDelete) {
-      try {
-        console.log(
-          `   Deleting bill ${deletedCount + 1}/${newBillsToDelete.length}: ${newBill._id}`,
-        );
-        await PaymentsModel.updateOne(
-          { _id: newBill._id },
-          {
-            $set: {
-              isDeleted: true,
-              deletedBy: userInfo._id,
-              deletedAt: new Date(),
-            },
-          },
-        );
-        deletedCount++;
-        console.log(`   ✅ Deleted successfully`);
-      } catch (err) {
-        console.error(`   ❌ Error deleting bill ${newBill._id}:`, err.message);
-      }
-    }
-
-    // Step 2: Find and reopen closed bills from target month
-    console.log(
-      "\n🔍 Step 2: Finding closed bills to reopen (from target month)...",
-    );
-    console.log("   Query Criteria:");
-    console.log("   - isDeleted: false");
-    console.log("   - onewash: false");
-    console.log("   - status: completed");
-    console.log("   - balance: > 0 (had unpaid balance)");
-    console.log(`   - createdAt: $gte ${monthStart.toISOString()}`);
-    console.log(`   - createdAt: $lte ${monthEnd.toISOString()}`);
-    console.log(
-      `   - updatedAt: $gte ${monthStart.toISOString()} (closed recently)`,
-    );
-
-    const closedBills = await PaymentsModel.find({
-      isDeleted: false,
-      onewash: false,
-      status: "completed",
-      balance: { $gt: 0 }, // Had unpaid balance when closed
-      createdAt: {
-        $gte: monthStart,
-        $lte: monthEnd,
-      },
-      updatedAt: {
-        // Find bills that were updated (closed) recently
-        $gte: monthStart, // Closed during or after target month
-      },
-    }).lean();
-
-    console.log(`\n🔓 Found ${closedBills.length} closed bills to reopen`);
-    if (closedBills.length > 0) {
-      console.log("\n📋 Bills to Reopen:");
-      closedBills.forEach((bill, idx) => {
-        console.log(`   ${idx + 1}. Bill ID: ${bill._id}`);
-        console.log(`      Balance: ₹${bill.balance}`);
-        console.log(`      Status: ${bill.status}`);
-        console.log(
-          `      Created: ${new Date(bill.createdAt).toLocaleString("en-US", { timeZone: "Asia/Kolkata" })}`,
-        );
-      });
-    }
-
-    // Reopen bills back to pending status
-    console.log("\n🔓 Reopening bills...");
-    for (const bill of closedBills) {
-      try {
-        console.log(
-          `   Reopening bill ${reopenedCount + 1}/${closedBills.length}: ${bill._id}`,
-        );
-        await PaymentsModel.updateOne(
-          { _id: bill._id },
-          {
-            $set: {
-              status: "pending", // Reopen to pending
-              updatedBy: userInfo._id,
-              updatedAt: new Date(),
-            },
-          },
-        );
-        reopenedCount++;
-        console.log(`   ✅ Reopened successfully (status: pending)`);
-      } catch (err) {
-        console.error(`   ❌ Error reopening bill ${bill._id}:`, err.message);
-      }
-    }
-
-    console.log("\n✅ ========== REVERT MONTH-END CLOSE SUMMARY ==========");
-    console.log(`   📊 New Bills Deleted: ${deletedCount}`);
-    console.log(`   📊 Old Bills Reopened: ${reopenedCount}`);
-    console.log(
-      `   ⏱️  Completed at: ${new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" })} IST`,
-    );
-    console.log("🟠 ========== [BACKEND] REVERT SERVICE COMPLETE ==========\n");
-
-    return {
-      deletedBills: deletedCount,
-      reopenedBills: reopenedCount,
-    };
-  } catch (error) {
-    console.error("❌ [SERVICE] Revert Month Close Failed:", error);
-    throw error;
-  }
-};
+// ✅ Revert Month-End Closing Service - REMOVED (Not needed)
 
 // ✅ Get Months with Pending Bills
 service.getMonthsWithPending = async () => {

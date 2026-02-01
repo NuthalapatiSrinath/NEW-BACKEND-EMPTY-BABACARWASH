@@ -15,8 +15,8 @@ cron.run = async () => {
         building: { $exists: true, $ne: "" },
       })
         .populate("building")
-        .lean()
-    )
+        .lean(),
+    ),
   );
 
   let tomorrowDate = moment()
@@ -30,7 +30,7 @@ cron.run = async () => {
     "Assign jobs is running on",
     moment().tz("Asia/Dubai").format(),
     "for the date",
-    tomorrowDate.format()
+    tomorrowDate.format(),
   );
 
   const jobs = [];
@@ -40,7 +40,7 @@ cron.run = async () => {
     // Safety check: if population failed (building is null), skip this customer
     if (!iterator.building) {
       console.log(
-        `⚠️ Skipping customer ${iterator._id} - Building not found after populate.`
+        `⚠️ Skipping customer ${iterator._id} - Building not found after populate.`,
       );
       continue;
     }

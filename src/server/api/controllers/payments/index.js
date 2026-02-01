@@ -50,10 +50,5 @@ router.put(
 );
 
 router.post("/close-month", AuthHelper.authenticate, controller.closeMonth);
-router.post(
-  "/revert-month-close",
-  AuthHelper.authenticate,
-  controller.revertMonthClose,
-);
 
 module.exports = router;

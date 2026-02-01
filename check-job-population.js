@@ -28,12 +28,14 @@ const checkJobPopulation = async () => {
       if (job.customer) {
         const customer = await CustomersModel.findById(job.customer);
         if (customer) {
-          console.log(`   ✅ Customer found: ${customer.firstName} ${customer.lastName} (${customer.mobile})`);
-          
+          console.log(
+            `   ✅ Customer found: ${customer.firstName} ${customer.lastName} (${customer.mobile})`,
+          );
+
           // Check if vehicle exists in customer
           if (job.vehicle) {
             const vehicle = customer.vehicles.find(
-              (v) => String(v._id) === String(job.vehicle)
+              (v) => String(v._id) === String(job.vehicle),
             );
             if (vehicle) {
               console.log(`   ✅ Vehicle found: ${vehicle.registration_no}`);

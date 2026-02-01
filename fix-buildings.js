@@ -13,7 +13,9 @@ const fixBuildings = async () => {
       building: { $exists: true },
     }).lean();
 
-    console.log(`📊 Checking ${customers.length} customers with building field\n`);
+    console.log(
+      `📊 Checking ${customers.length} customers with building field\n`,
+    );
 
     const validBuildingId = "6973ca88d9d1f1001560545a"; // Gardenia Residence
 
@@ -26,12 +28,12 @@ const fixBuildings = async () => {
 
       if (String(customer.building) !== validBuildingId) {
         console.log(
-          `🔧 Fixing ${customer.mobile} - Invalid building: ${customer.building} → ${validBuildingId}`
+          `🔧 Fixing ${customer.mobile} - Invalid building: ${customer.building} → ${validBuildingId}`,
         );
 
         await CustomersModel.updateOne(
           { _id: customer._id },
-          { $unset: { building: "" } } // Remove the invalid building
+          { $unset: { building: "" } }, // Remove the invalid building
         );
         fixed++;
       }
@@ -39,7 +41,7 @@ const fixBuildings = async () => {
 
     console.log(`\n✅ Fixed ${fixed} customers (removed invalid building IDs)`);
     console.log(
-      `\n💡 Now you need to manually assign correct buildings from the frontend`
+      `\n💡 Now you need to manually assign correct buildings from the frontend`,
     );
 
     process.exit(0);

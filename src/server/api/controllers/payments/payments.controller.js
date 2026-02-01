@@ -263,31 +263,6 @@ controller.closeMonth = async (req, res) => {
   }
 };
 
-controller.revertMonthClose = async (req, res) => {
-  try {
-    const { user } = req;
-    const { month, year } = req.body;
-    console.log("🔵 [CONTROLLER] Revert Month-End Close Request");
-    console.log("👤 User:", user.name, user.role);
-    console.log("📅 Month:", month, "Year:", year);
-
-    const result = await service.revertMonthClose(user, month, year);
-
-    console.log("✅ [CONTROLLER] Revert Success");
-    return res.status(200).json({
-      statusCode: 200,
-      message: "Month closure reverted successfully",
-      deletedBills: result.deletedBills,
-      reopenedBills: result.reopenedBills,
-    });
-  } catch (error) {
-    console.error("❌ [CONTROLLER] Revert Month Close Error:", error);
-    return res
-      .status(500)
-      .json({ message: "Failed to revert month close", error: error.message });
-  }
-};
-
 controller.getMonthsWithPending = async (req, res) => {
   try {
     const { user } = req;

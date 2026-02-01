@@ -11,10 +11,12 @@ const fixJobs = async () => {
     // Find all jobs with empty string worker
     const result = await JobsModel.updateMany(
       { worker: "" },
-      { $unset: { worker: "" } }
+      { $unset: { worker: "" } },
     );
 
-    console.log(`✅ Fixed ${result.modifiedCount} jobs (removed empty worker field)`);
+    console.log(
+      `✅ Fixed ${result.modifiedCount} jobs (removed empty worker field)`,
+    );
 
     process.exit(0);
   } catch (error) {

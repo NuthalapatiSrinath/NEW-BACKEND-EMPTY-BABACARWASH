@@ -27,7 +27,8 @@ const checkBuildings = async () => {
     let emptyCount = 0;
 
     for (const customer of customers) {
-      const name = `${customer.firstName || ""} ${customer.lastName || ""}`.trim();
+      const name =
+        `${customer.firstName || ""} ${customer.lastName || ""}`.trim();
       const mobile = customer.mobile;
 
       if (!customer.building || customer.building === "") {
@@ -36,18 +37,18 @@ const checkBuildings = async () => {
       } else {
         // Try to find the building
         const building = buildings.find(
-          (b) => String(b._id) === String(customer.building)
+          (b) => String(b._id) === String(customer.building),
         );
 
         if (building) {
           validCount++;
           console.log(
-            `✅ ${name} (${mobile}) - Building: ${building.name} (${customer.building})`
+            `✅ ${name} (${mobile}) - Building: ${building.name} (${customer.building})`,
           );
         } else {
           invalidCount++;
           console.log(
-            `⚠️ ${name} (${mobile}) - Invalid building ID: ${customer.building}`
+            `⚠️ ${name} (${mobile}) - Invalid building ID: ${customer.building}`,
           );
         }
       }
