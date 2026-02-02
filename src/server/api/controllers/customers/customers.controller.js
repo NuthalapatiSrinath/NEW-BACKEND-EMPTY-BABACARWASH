@@ -405,6 +405,7 @@ controller.downloadTemplate = async (req, res) => {
       { header: "Amount*", key: "amount", width: 12 },
       { header: "Advance Amount", key: "advance_amount", width: 15 },
       { header: "Start Date (DD/MM/YYYY)", key: "start_date", width: 20 },
+      { header: "Onboard Date (DD/MM/YYYY)", key: "onboard_date", width: 22 },
     ];
 
     // Add sample rows - Multiple vehicles for same customer
@@ -420,6 +421,7 @@ controller.downloadTemplate = async (req, res) => {
       amount: "300",
       advance_amount: "100",
       start_date: "01/02/2026",
+      onboard_date: "01/02/2026", // Date when vehicle was first onboarded
     });
 
     // Same customer, different vehicle
@@ -435,6 +437,7 @@ controller.downloadTemplate = async (req, res) => {
       amount: "250",
       advance_amount: "50",
       start_date: "01/02/2026",
+      onboard_date: "01/02/2026", // Same onboard date for same customer
     });
 
     // Third sample - onetime schedule
@@ -450,6 +453,7 @@ controller.downloadTemplate = async (req, res) => {
       amount: "150",
       advance_amount: "0",
       start_date: "15/02/2026",
+      onboard_date: "15/02/2026", // Can be different if joining later
     });
 
     res.setHeader(

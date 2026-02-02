@@ -344,13 +344,51 @@ service.update = async (userInfo, id, payload) => {
 
   // If vehicles array exists, update vehicle info
   if (payload.vehicles && payload.vehicles.length > 0) {
-    const vehicle = payload.vehicles[0];
+    // Get current customer data first to preserve onboard_dates
+    const currentCustomer = await CustomersModel.findById(id).lean();
+    
+    // Process each vehicle
+    for (const vehicle of payload.vehicles) {
+      // For existing vehicles
+      if (vehicle._id && currentCustomer) {
+        const existingVehicle = currentCustomer.vehicles?.find(
+          v => v._id.toString() === vehicle._id.toString()
+        );
+        if (existingVehicle) {
+          // ONE-TIME MIGRATION: If onboard_date doesn't exist in DB, set it from start_date
+          if (!existingVehicle.onboard_date && existingVehicle.start_date) {
+            vehicle.onboard_date = existingVehicle.start_date;
+          }
+          // Otherwise, keep the existing onboard_date (don't let frontend override it)
+          else if (existingVehicle.onboard_date) {
+            vehicle.onboard_date = existingVehicle.onboard_date;
+          }
+          
+          // If status is changing from inactive (0) to active (1), update start_date to today
+          if (existingVehicle.status === 0 && vehicle.status === 1) {
+            vehicle.start_date = new Date(); // Set to today's date on reactivation
+          }
+        }
+      }
+    }
+    
+    const vehiclesToUpdate = payload.vehicles;
     delete payload.vehicles;
+    
+    // Update customer fields
     await CustomersModel.updateOne({ _id: id }, { $set: payload });
-    await CustomersModel.updateOne(
-      { _id: id, "vehicles._id": vehicle._id },
-      { $set: { "vehicles.$": vehicle } },
-    );
+    
+    // Update each vehicle
+    for (const vehicle of vehiclesToUpdate) {
+      if (vehicle._id) {
+        // Existing vehicle - update it
+        await CustomersModel.updateOne(
+          { _id: id, "vehicles._id": vehicle._id },
+          { $set: { "vehicles.$": vehicle } },
+        );
+      }
+    }
+    
     const customerData = await CustomersModel.findOne({ _id: id }).lean();
     await JobsService.createJob(customerData);
   } else {
@@ -556,6 +594,7 @@ service.vehicleDeactivate = async (userInfo, id, payload) => {
 };
 
 service.vehicleActivate = async (userInfo, id, payload) => {
+  // Only update start_date on activation, onboard_date remains unchanged
   await CustomersModel.updateOne(
     { "vehicles._id": id },
     {
@@ -654,6 +693,8 @@ service.importData = async (userInfo, excelData) => {
         }
       }
 
+      const currentDate = new Date();
+      const startDate = data.start_date || currentDate;
       return {
         registration_no: data.registration_no || data.vehicleNo,
         parking_no: data.parking_no || data.parkingNo,
@@ -661,7 +702,8 @@ service.importData = async (userInfo, excelData) => {
         amount: data.amount || 0,
         schedule_type: data.schedule_type || "daily",
         schedule_days,
-        start_date: data.start_date || new Date(),
+        start_date: startDate,
+        onboard_date: data.onboard_date || startDate, // Set onboard_date to start_date if not provided
         advance_amount: data.advance_amount || 0,
         status: 1,
       };
@@ -673,27 +715,18 @@ service.importData = async (userInfo, excelData) => {
 
     for (const iterator of excelData) {
       try {
-        // ✅ Mobile number is now optional, but registration_no is required
+        if (!iterator.mobile) throw "Mobile number is required";
         if (!iterator.registration_no)
           throw "Vehicle registration number is required";
 
-        let customerInfo = null;
-
-        // ✅ FIX: Generate unique mobile number if not provided
-        // This ensures each customer without mobile is treated as separate
-        if (!iterator.mobile || !iterator.mobile.trim()) {
-          iterator.mobile = await generateAutoMobile();
-          console.log(
-            `📱 Generated auto mobile for ${iterator.firstName || "customer"}: ${iterator.mobile}`,
-          );
-        }
-
-        // Search for existing customer by mobile number
+        // Check if customer exists
         const findUserQuery = {
           isDeleted: false,
-          mobile: iterator.mobile.trim(),
+          $or: [{ mobile: iterator.mobile }],
         };
-        customerInfo = await CustomersModel.findOne(findUserQuery);
+        if (iterator.email) findUserQuery.$or.push({ email: iterator.email });
+
+        let customerInfo = await CustomersModel.findOne(findUserQuery);
 
         const location = iterator.location
           ? await LocationsModel.findOne({
@@ -1138,6 +1171,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
     const amount = getCellText(row.getCell(9));
     const advance_amount = getCellText(row.getCell(10));
     const start_date = row.getCell(11).value;
+    const onboard_date = row.getCell(12).value; // Read onboard_date from column 12
 
     console.log(
       `🔍 Reading Row ${rowNumber}: ${firstName} ${lastName}, Mobile="${mobile}", Vehicle="${registration_no}"`,
@@ -1161,6 +1195,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       amount,
       advance_amount,
       start_date,
+      onboard_date, // Include onboard_date
       rowNumber,
     });
   });
@@ -1169,7 +1204,6 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
 
   const results = { success: 0, errors: [], created: 0, updated: 0 };
   const customerGroups = new Map(); // Group vehicles by customer identifier
-  let lastAutoMobileNumber = null; // Track last generated mobile in this session
 
   // Step 1: Group rows by customer (by mobile or firstName+lastName)
   for (const row of excelData) {
@@ -1188,19 +1222,20 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       // Auto-generate mobile if not provided
       let mobile = row.mobile;
       if (!mobile || mobile.trim() === "") {
-        // Each row without mobile gets a UNIQUE auto-generated number
-        if (lastAutoMobileNumber === null) {
-          // First time - query the database
-          mobile = await generateAutoMobile();
-          lastAutoMobileNumber = parseInt(mobile.substring(7)); // Extract the number part
+        // Check if we already generated a mobile for this customer in this batch
+        const customerKey =
+          `${row.firstName || "Customer"}-${row.lastName || ""}`.toLowerCase();
+        if (
+          customerGroups.has(customerKey) &&
+          customerGroups.get(customerKey).mobile
+        ) {
+          mobile = customerGroups.get(customerKey).mobile;
         } else {
-          // Subsequent times - increment from last generated
-          lastAutoMobileNumber++;
-          mobile = `2000000${String(lastAutoMobileNumber).padStart(3, "0")}`;
+          mobile = await generateAutoMobile();
+          console.log(
+            `📱 Auto-generated mobile: ${mobile} for ${row.firstName || "Customer"}`,
+          );
         }
-        console.log(
-          `📱 Auto-generated mobile: ${mobile} for ${row.firstName || "Customer"}`,
-        );
       }
 
       // Use mobile as the primary grouping key
@@ -1215,6 +1250,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       }
 
       // Add vehicle to this customer
+      const startDate = parseExcelDate(row.start_date) || new Date();
       customerGroups.get(mobile).vehicles.push({
         registration_no: row.registration_no,
         parking_no: row.parking_no || "",
@@ -1222,7 +1258,8 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         schedule_days: row.schedule_days || "",
         amount: parseFloat(row.amount) || 0,
         advance_amount: parseFloat(row.advance_amount) || 0,
-        start_date: parseExcelDate(row.start_date) || new Date(),
+        start_date: startDate,
+        onboard_date: parseExcelDate(row.onboard_date) || startDate, // Use start_date as fallback
         status: 1,
         rowNumber: row.rowNumber,
       });
