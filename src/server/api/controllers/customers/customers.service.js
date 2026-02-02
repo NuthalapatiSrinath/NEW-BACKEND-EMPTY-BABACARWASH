@@ -346,13 +346,13 @@ service.update = async (userInfo, id, payload) => {
   if (payload.vehicles && payload.vehicles.length > 0) {
     // Get current customer data first to preserve onboard_dates
     const currentCustomer = await CustomersModel.findById(id).lean();
-    
+
     // Process each vehicle
     for (const vehicle of payload.vehicles) {
       // For existing vehicles
       if (vehicle._id && currentCustomer) {
         const existingVehicle = currentCustomer.vehicles?.find(
-          v => v._id.toString() === vehicle._id.toString()
+          (v) => v._id.toString() === vehicle._id.toString(),
         );
         if (existingVehicle) {
           // ONE-TIME MIGRATION: If onboard_date doesn't exist in DB, set it from start_date
@@ -363,7 +363,7 @@ service.update = async (userInfo, id, payload) => {
           else if (existingVehicle.onboard_date) {
             vehicle.onboard_date = existingVehicle.onboard_date;
           }
-          
+
           // If status is changing from inactive (0) to active (1), update start_date to today
           if (existingVehicle.status === 0 && vehicle.status === 1) {
             vehicle.start_date = new Date(); // Set to today's date on reactivation
@@ -371,13 +371,13 @@ service.update = async (userInfo, id, payload) => {
         }
       }
     }
-    
+
     const vehiclesToUpdate = payload.vehicles;
     delete payload.vehicles;
-    
+
     // Update customer fields
     await CustomersModel.updateOne({ _id: id }, { $set: payload });
-    
+
     // Update each vehicle
     for (const vehicle of vehiclesToUpdate) {
       if (vehicle._id) {
@@ -388,7 +388,7 @@ service.update = async (userInfo, id, payload) => {
         );
       }
     }
-    
+
     const customerData = await CustomersModel.findOne({ _id: id }).lean();
     await JobsService.createJob(customerData);
   } else {
@@ -1205,6 +1205,19 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
   const results = { success: 0, errors: [], created: 0, updated: 0 };
   const customerGroups = new Map(); // Group vehicles by customer identifier
 
+  // Get the starting auto-mobile number once at the beginning
+  const latestCustomer = await CustomersModel.findOne({
+    mobile: /^2000000\d{3}$/,
+  })
+    .sort({ mobile: -1 })
+    .lean();
+
+  let autoMobileCounter = 1;
+  if (latestCustomer && latestCustomer.mobile) {
+    const lastNumber = parseInt(latestCustomer.mobile.substring(7));
+    autoMobileCounter = lastNumber + 1;
+  }
+
   // Step 1: Group rows by customer (by mobile or firstName+lastName)
   for (const row of excelData) {
     try {
@@ -1222,20 +1235,12 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       // Auto-generate mobile if not provided
       let mobile = row.mobile;
       if (!mobile || mobile.trim() === "") {
-        // Check if we already generated a mobile for this customer in this batch
-        const customerKey =
-          `${row.firstName || "Customer"}-${row.lastName || ""}`.toLowerCase();
-        if (
-          customerGroups.has(customerKey) &&
-          customerGroups.get(customerKey).mobile
-        ) {
-          mobile = customerGroups.get(customerKey).mobile;
-        } else {
-          mobile = await generateAutoMobile();
-          console.log(
-            `📱 Auto-generated mobile: ${mobile} for ${row.firstName || "Customer"}`,
-          );
-        }
+        // Each vehicle without mobile gets a unique auto-generated mobile using local counter
+        mobile = `2000000${String(autoMobileCounter).padStart(3, "0")}`;
+        autoMobileCounter++; // Increment for next vehicle
+        console.log(
+          `📱 Auto-generated mobile: ${mobile} for ${row.firstName || "Customer"} - Vehicle ${row.registration_no}`,
+        );
       }
 
       // Use mobile as the primary grouping key

@@ -112,15 +112,43 @@ service.list = async (userInfo, rawQuery) => {
     .limit(paginationData.limit)
     .lean();
 
+  // Populate references individually to avoid one failure breaking all
   try {
-    data = await JobsModel.populate(data, [
-      { path: "customer", model: "customers" },
-      { path: "location", model: "locations" },
-      { path: "building", model: "buildings" },
-      { path: "worker", model: "workers" },
-    ]);
+    data = await JobsModel.populate(data, {
+      path: "customer",
+      model: "customers",
+    });
   } catch (e) {
-    console.warn("List Populate Warning (Ignored):", e.message);
+    console.warn("Customer Populate Warning:", e.message);
+  }
+
+  try {
+    data = await JobsModel.populate(data, {
+      path: "location",
+      model: "locations",
+    });
+  } catch (e) {
+    console.warn("Location Populate Warning:", e.message);
+  }
+
+  try {
+    data = await JobsModel.populate(data, {
+      path: "building",
+      model: "buildings",
+    });
+  } catch (e) {
+    console.warn("Building Populate Warning:", e.message);
+  }
+
+  try {
+    // Only populate worker if it's not empty
+    data = await JobsModel.populate(data, {
+      path: "worker",
+      model: "workers",
+      match: { _id: { $ne: null } },
+    });
+  } catch (e) {
+    console.warn("Worker Populate Warning:", e.message);
   }
 
   // Map vehicle data - use stored fields or populate from customer.vehicles
@@ -147,7 +175,27 @@ service.list = async (userInfo, rawQuery) => {
           _id: vehicleData._id,
           registration_no: vehicleData.registration_no,
           parking_no: vehicleData.parking_no,
+          schedule_type: vehicleData.schedule_type,
+          schedule_days: vehicleData.schedule_days,
+          amount: vehicleData.amount,
+          vehicle_type: vehicleData.vehicle_type,
+          status: vehicleData.status,
         };
+
+        // If job doesn't have a worker but vehicle does, populate worker from vehicle
+        if (!iterator.worker && vehicleData.worker) {
+          try {
+            const WorkersModel = require("../../models/workers.model");
+            const workerData = await WorkersModel.findById(
+              vehicleData.worker,
+            ).lean();
+            if (workerData) {
+              iterator.worker = workerData;
+            }
+          } catch (e) {
+            console.warn("Worker populate failed:", e.message);
+          }
+        }
       }
     }
   }
@@ -179,6 +227,12 @@ service.create = async (userInfo, payload) => {
 service.update = async (userInfo, id, payload) => {
   if (payload.worker === "") payload.worker = null;
   if (payload.customer === "") payload.customer = null;
+
+  // Set completedDate when status changes to completed
+  if (payload.status === "completed" && !payload.completedDate) {
+    payload.completedDate = new Date();
+  }
+
   await JobsModel.updateOne({ _id: id }, { $set: payload });
 };
 
@@ -412,26 +466,62 @@ service.monthlyStatement = async (userInfo, query) => {
         if (vehicleStart && moment(vehicleStart).isAfter(monthEnd)) return;
         if (vehicleEnd && moment(vehicleEnd).isBefore(monthStart)) return;
 
-        // Convert schedule_days to day names
+        // Convert schedule_days to day names (handle string or array format)
         let scheduleDays = [];
-        if (vehicle.schedule_days && Array.isArray(vehicle.schedule_days)) {
-          scheduleDays = vehicle.schedule_days
-            .map((d) => {
-              if (typeof d === "object" && d.day) {
-                const dayMap = {
-                  Mon: "monday",
-                  Tue: "tuesday",
-                  Wed: "wednesday",
-                  Thu: "thursday",
-                  Fri: "friday",
-                  Sat: "saturday",
-                  Sun: "sunday",
-                };
-                return dayMap[d.day] || d.day.toLowerCase();
-              }
-              return typeof d === "string" ? d.toLowerCase() : "";
-            })
-            .filter((d) => d);
+        if (vehicle.schedule_days) {
+          // Handle string format: "Tue,Thu,Sat,Sun"
+          if (typeof vehicle.schedule_days === "string") {
+            const dayMap = {
+              Mon: "monday",
+              Tue: "tuesday",
+              Wed: "wednesday",
+              Thu: "thursday",
+              Fri: "friday",
+              Sat: "saturday",
+              Sun: "sunday",
+            };
+            scheduleDays = vehicle.schedule_days
+              .split(",")
+              .map((d) => dayMap[d.trim()] || d.trim().toLowerCase())
+              .filter((d) => d);
+          }
+          // Handle array format
+          else if (Array.isArray(vehicle.schedule_days)) {
+            scheduleDays = vehicle.schedule_days
+              .flatMap((d) => {
+                if (typeof d === "object" && d.day) {
+                  const dayMap = {
+                    Mon: "monday",
+                    Tue: "tuesday",
+                    Wed: "wednesday",
+                    Thu: "thursday",
+                    Fri: "friday",
+                    Sat: "saturday",
+                    Sun: "sunday",
+                  };
+                  return dayMap[d.day] || d.day.toLowerCase();
+                }
+                // If array element is a comma-separated string like "Mon,Wed,Fri"
+                if (typeof d === "string" && d.includes(",")) {
+                  const dayMap = {
+                    Mon: "monday",
+                    Tue: "tuesday",
+                    Wed: "wednesday",
+                    Thu: "thursday",
+                    Fri: "friday",
+                    Sat: "saturday",
+                    Sun: "sunday",
+                  };
+                  return d
+                    .split(",")
+                    .map(
+                      (day) => dayMap[day.trim()] || day.trim().toLowerCase(),
+                    );
+                }
+                return typeof d === "string" ? d.toLowerCase() : "";
+              })
+              .filter((d) => d);
+          }
         }
 
         // Calculate schedule marks for each day in the month
@@ -448,7 +538,9 @@ service.monthlyStatement = async (userInfo, query) => {
           // Check if this day matches the schedule
           let isScheduled = false;
           if (vehicle.schedule_type === "daily") {
-            isScheduled = true;
+            // Exclude Sundays for daily schedules (0 = Sunday)
+            const dayOfWeek = currentDate.day();
+            isScheduled = dayOfWeek !== 0;
           } else if (
             vehicle.schedule_type === "weekly" &&
             scheduleDays.length > 0
@@ -472,19 +564,30 @@ service.monthlyStatement = async (userInfo, query) => {
         }
 
         const carKey = vehicle._id.toString();
+
+        // Calculate dynamic weekly schedule indicator (W1, W2, W3, W4, etc.)
+        let cleaningDisplay = "W3"; // default
+        if (vehicle.schedule_type === "daily") {
+          cleaningDisplay = "D";
+        } else if (vehicle.schedule_type === "onetime") {
+          cleaningDisplay = "OT";
+        } else if (
+          vehicle.schedule_type === "weekly" &&
+          scheduleDays.length > 0
+        ) {
+          cleaningDisplay = `W${scheduleDays.length}`;
+        }
+
         carMap.set(carKey, {
+          customerId: customer.id || customer._id,
+          customerMobile: customer.mobile || "",
           parkingNo: vehicle.parking_no || "",
           carNumber: vehicle.registration_no || "",
           customerName: customerName,
           dateOfStart: vehicleStart
             ? moment(vehicleStart).format("DD-MMM")
             : "-",
-          cleaning:
-            vehicle.schedule_type === "daily"
-              ? "D"
-              : vehicle.schedule_type === "onetime"
-                ? "OT"
-                : "W3",
+          cleaning: cleaningDisplay,
           dailyMarks: dailyMarks,
           amount: vehicle.amount || 0,
           duDate: vehicleEnd ? moment(vehicleEnd).format("DD-MMM") : "-",
@@ -572,9 +675,9 @@ service.monthlyStatement = async (userInfo, query) => {
     : "RESIDENCE LOCATIONS";
 
   // --- HEADER ROW 1: Company Name with Logo Space ---
-  // Adjusted columns to include "Tips" column
+  // Adjusted columns to include "Customer ID", "Mobile", and "Tips" columns
   const totalCols = isWorkerSelected
-    ? 5 + daysInMonth + 3
+    ? 7 + daysInMonth + 3
     : 2 + daysInMonth + 1;
 
   reportSheet.mergeCells(1, 1, 1, totalCols);
@@ -678,18 +781,20 @@ service.monthlyStatement = async (userInfo, query) => {
     };
   }
 
-  // --- ROW 3: Column Headers (Added TIPS) ---
+  // --- ROW 3: Column Headers (Added CUSTOMER ID and MOBILE) ---
   let headerRow1;
   if (isWorkerSelected) {
     headerRow1 = reportSheet.addRow([
       "S.N O",
+      "CUSTOMER ID",
+      "MOBILE",
       "PARKING NO",
       "CAR NO.",
       "DATE OF START",
       "CLEANING",
       ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
       "Total",
-      "Tips", // ✅ Added Tips Header
+      "Tips",
       "DU DATE",
     ]);
   } else {
@@ -721,7 +826,7 @@ service.monthlyStatement = async (userInfo, query) => {
       right: { style: "thin" },
     };
 
-    const dayColumnStart = isWorkerSelected ? 5 : 2;
+    const dayColumnStart = isWorkerSelected ? 7 : 2;
     if (
       colNumber > dayColumnStart &&
       colNumber <= dayColumnStart + daysInMonth
@@ -743,6 +848,8 @@ service.monthlyStatement = async (userInfo, query) => {
   let dayNamesRow;
   if (isWorkerSelected) {
     dayNamesRow = reportSheet.addRow([
+      "",
+      "",
       "",
       "",
       "",
@@ -779,7 +886,7 @@ service.monthlyStatement = async (userInfo, query) => {
       right: { style: "thin" },
     };
 
-    const dayColumnStart = isWorkerSelected ? 5 : 2;
+    const dayColumnStart = isWorkerSelected ? 7 : 2;
     if (
       colNumber > dayColumnStart &&
       colNumber <= dayColumnStart + daysInMonth
@@ -817,11 +924,32 @@ service.monthlyStatement = async (userInfo, query) => {
       const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
 
       if (!carMapExcel.has(carKey)) {
+        // Calculate cleaning indicator for this vehicle
+        let cleaningIndicator = "W3"; // default
+        if (job.immediate) {
+          cleaningIndicator = "D";
+        } else if (vehicleInfo?.schedule_days) {
+          // Parse schedule_days to count actual days
+          let dayCount = 0;
+          if (typeof vehicleInfo.schedule_days === "string") {
+            dayCount = vehicleInfo.schedule_days
+              .split(",")
+              .filter((d) => d.trim()).length;
+          } else if (Array.isArray(vehicleInfo.schedule_days)) {
+            dayCount = vehicleInfo.schedule_days.length;
+          }
+          if (dayCount > 0) {
+            cleaningIndicator = `W${dayCount}`;
+          }
+        }
+
         carMapExcel.set(carKey, {
+          customerId: job.customer?.id || job.customer?._id || "",
+          customerMobile: job.customer?.mobile || "",
           parkingNo: vehicleInfo?.parking_no || "",
           carNumber: vehicleInfo?.registration_no || "",
           dateOfStart: moment(job.assignedDate).format("DD-MMM"),
-          cleaning: job.immediate ? "D" : "W3",
+          cleaning: cleaningIndicator,
           dailyMarks: Array(daysInMonth).fill(0),
           amount: job.price || 0,
           duDate: moment(job.completedDate || job.assignedDate).format(
@@ -840,22 +968,72 @@ service.monthlyStatement = async (userInfo, query) => {
     dataSource = workerSummaries; // We can reuse this from JSON calculation earlier
   }
 
+  // Sort dataSource by mobile number to group vehicles from same customer (same mobile)
+  if (isWorkerSelected) {
+    dataSource.sort((a, b) => {
+      const mobileA = a.customerMobile || "";
+      const mobileB = b.customerMobile || "";
+      // Secondary sort by customer ID for consistency
+      if (mobileA === mobileB) {
+        const idA = a.customerId || "";
+        const idB = b.customerId || "";
+        return String(idA).localeCompare(String(idB));
+      }
+      return String(mobileA).localeCompare(String(mobileB));
+    });
+  }
+
+  let lastMobile = null;
   for (const item of dataSource) {
     let rowData;
     if (isWorkerSelected) {
       // Calculate row total for car
       const rowTotal = item.dailyMarks.reduce((a, b) => a + b, 0);
+
+      // Grouping logic:
+      // - If mobile exists and is same as last → group together (don't show S.NO)
+      // - If mobile is empty/missing → ALWAYS separate row (show S.NO)
+      // - If mobile exists but different → separate row (show S.NO)
+      const currentMobile = item.customerMobile || "";
+
+      console.log("\n=== EXCEL ROW GROUPING DEBUG ===");
+      console.log("Parking:", item.parkingNo, "| Car:", item.carNumber);
+      console.log("Customer ID:", item.customerId);
+      console.log(
+        "Current Mobile:",
+        currentMobile,
+        "(empty?",
+        !currentMobile,
+        ")",
+      );
+      console.log("Last Mobile:", lastMobile);
+      console.log("Mobile !== Last?", currentMobile !== lastMobile);
+
+      // IMPORTANT: If no mobile, always show customer info (each vehicle gets own row)
+      // If mobile exists, only group if it matches the last mobile
+      const showCustomerInfo = !currentMobile || currentMobile !== lastMobile;
+
+      console.log("Show Customer Info?", showCustomerInfo);
+      console.log("Row Number:", showCustomerInfo ? rowNumber : "GROUPED");
+      console.log("=================================\n");
+
+      lastMobile = currentMobile;
+
       rowData = [
-        rowNumber,
+        showCustomerInfo ? rowNumber : "",
+        showCustomerInfo ? item.customerId || "" : "",
+        showCustomerInfo ? item.customerMobile || "" : "",
         item.parkingNo,
         item.carNumber,
         item.dateOfStart,
         item.cleaning,
         ...item.dailyMarks.map((count) => (count > 0 ? count : "")),
         rowTotal,
-        item.tips, // ✅ Added Tips
+        item.tips,
         item.duDate,
       ];
+
+      if (showCustomerInfo) rowNumber++;
     } else {
       const rowTotal = item.dailyCounts.reduce((a, b) => a + b, 0);
       rowData = [
@@ -865,10 +1043,10 @@ service.monthlyStatement = async (userInfo, query) => {
         rowTotal,
         item.tips, // ✅ Added Tips
       ];
+      rowNumber++;
     }
 
     const dataRow = reportSheet.addRow(rowData);
-    rowNumber++;
 
     dataRow.eachCell((cell, colNumber) => {
       cell.border = {
@@ -882,12 +1060,12 @@ service.monthlyStatement = async (userInfo, query) => {
 
       if (
         (!isWorkerSelected && colNumber === 2) ||
-        (isWorkerSelected && colNumber === 2)
+        (isWorkerSelected && (colNumber === 2 || colNumber === 3))
       ) {
         cell.alignment = { horizontal: "left", vertical: "middle" };
       }
 
-      const dayColumnStart = isWorkerSelected ? 5 : 2;
+      const dayColumnStart = isWorkerSelected ? 7 : 2;
       if (
         colNumber > dayColumnStart &&
         colNumber <= dayColumnStart + daysInMonth

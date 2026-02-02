@@ -263,6 +263,8 @@ service.info = async (userInfo, id) => {
 
 service.create = async (userInfo, payload) => {
   const id = await CounterService.id("payments");
+
+  // Don't generate receipt_no on creation - only when payment is collected/completed
   const data = {
     createdBy: userInfo._id,
     updatedBy: userInfo._id,
@@ -311,18 +313,21 @@ service.collectPayment = async (userInfo, id, payload) => {
   const status =
     newAmountPaid < paymentData.total_amount ? "pending" : "completed";
 
-  await PaymentsModel.updateOne(
-    { _id: id },
-    {
-      $set: {
-        amount_paid: newAmountPaid,
-        payment_mode: payload.payment_mode,
-        balance,
-        status,
-        collectedDate: payload.payment_date,
-      },
-    },
-  );
+  // Generate receipt number only when payment becomes completed
+  const updateData = {
+    amount_paid: newAmountPaid,
+    payment_mode: payload.payment_mode,
+    balance,
+    status,
+    collectedDate: payload.payment_date,
+  };
+
+  // If payment is fully completed and doesn't have receipt_no yet, generate it
+  if (status === "completed" && !paymentData.receipt_no) {
+    updateData.receipt_no = `RCP${String(paymentData.id).padStart(6, "0")}`;
+  }
+
+  await PaymentsModel.updateOne({ _id: id }, { $set: updateData });
 
   await new TransactionsModel({
     payment: id,
@@ -714,7 +719,10 @@ service.monthlyStatement = async (userInfo, query) => {
       payDate: item.collectedDate
         ? moment(item.collectedDate).format("DD-MM-YYYY")
         : "-", // 14. Payment Date
-      receipt: item.receipt_no || item._id.toString().slice(-6).toUpperCase(), // 15. Receipt Number (System Gen)
+      receipt:
+        item.status === "completed"
+          ? item.receipt_no || `RCP${String(item.id).padStart(6, "0")}`
+          : "-", // 15. Receipt Number (Only for completed payments)
       dueDate: moment(item.createdAt).endOf("month").format("DD-MM-YYYY"), // 16. Payment Due Date (End of billing month)
       remarks: item.notes || "-", // 17. Remarks
 
@@ -1384,7 +1392,10 @@ service.monthlyStatement = async (userInfo, query) => {
       payDate: item.collectedDate
         ? moment(item.collectedDate).format("DD-MM-YYYY")
         : "-",
-      receipt: item.receipt_no || item._id.toString().slice(-6).toUpperCase(),
+      receipt:
+        item.status === "completed"
+          ? item.receipt_no || `RCP${String(item.id).padStart(6, "0")}`
+          : "-", // Only for completed payments
       dueDate: moment(item.createdAt).endOf("month").format("DD-MM-YYYY"),
       remarks: item.notes || "-",
 
