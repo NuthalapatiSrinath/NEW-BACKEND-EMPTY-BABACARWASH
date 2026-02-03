@@ -6,7 +6,7 @@ const CounterService = require("../../server/utils/counters");
 
 const cron = module.exports;
 
-cron.run = async () => {
+cron.run = async (targetDate = null) => {
   // FIX: Added $ne: "" to filter out invalid empty strings that cause CastError
   let customers = JSON.parse(
     JSON.stringify(
@@ -19,18 +19,21 @@ cron.run = async () => {
     ),
   );
 
-  let tomorrowDate = moment()
-    .tz("Asia/Dubai")
-    .startOf("day")
-    .add(1, "day")
-    .tz("Asia/Dubai");
+  // If targetDate is provided, use it; otherwise default to tomorrow
+  let tomorrowDate = targetDate
+    ? moment.tz(targetDate, "Asia/Dubai").startOf("day")
+    : moment().tz("Asia/Dubai").startOf("day").add(1, "day");
   let todayData = moment().tz("Asia/Dubai").startOf("day").tz("Asia/Dubai");
+
+  // Determine if this is a manual run
+  const isManualRun = !!targetDate;
 
   console.log(
     "Assign jobs is running on",
     moment().tz("Asia/Dubai").format(),
     "for the date",
-    tomorrowDate.format(),
+    tomorrowDate.format("YYYY-MM-DD"),
+    targetDate ? "(Manual Trigger)" : "(Auto Cron)",
   );
 
   const jobs = [];
@@ -46,14 +49,22 @@ cron.run = async () => {
     }
 
     for (const vehicle of iterator.vehicles) {
+      console.log(
+        `\n🚗 Processing vehicle ${vehicle._id} - Type: ${vehicle.schedule_type}, Status: ${vehicle.status}`,
+      );
+
       if (
         vehicle.status == 2 &&
         moment(vehicle.deactivateDate).isBefore(tomorrowDate)
       ) {
-        console.log("Vehicle is inactive", vehicle._id, iterator._id);
+        console.log("❌ Vehicle is inactive", vehicle._id, iterator._id);
         continue;
       } else if (moment(vehicle.start_date).isAfter(tomorrowDate)) {
-        console.log("Vehicle start date is ahead", vehicle._id, iterator._id);
+        console.log(
+          "❌ Vehicle start date is ahead",
+          vehicle._id,
+          iterator._id,
+        );
         continue;
       }
 
@@ -64,6 +75,9 @@ cron.run = async () => {
       }
 
       if (vehicle.schedule_type == "daily") {
+        console.log(
+          `✅ Daily schedule for vehicle ${vehicle._id} (Customer: ${iterator.name})`,
+        );
         jobs.push({
           scheduleId,
           vehicle: vehicle._id,
@@ -72,20 +86,69 @@ cron.run = async () => {
           ...(vehicle.worker ? { worker: vehicle.worker } : {}),
           location: iterator.location,
           building: iterator.building._id,
-          createdBy: "Cron Scheduler",
+          createdBy: isManualRun ? "Manual Scheduler" : "Cron Scheduler",
           ...(iterator.building.schedule_today ? { immediate: true } : null),
         });
       }
 
       if (vehicle.schedule_type == "weekly") {
-        let currentDayIncluded = vehicle.schedule_days.filter((e) => {
-          if (iterator.building.schedule_today) {
-            return e.value == todayData.get("day");
-          } else {
-            return e.value == tomorrowDate.get("day");
+        const targetDay = iterator.building.schedule_today
+          ? todayData.get("day")
+          : tomorrowDate.get("day");
+
+        // Map day numbers to day names
+        const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const targetDayName = dayNames[targetDay];
+
+        console.log(
+          `📅 Checking weekly schedule for vehicle ${vehicle._id} (Customer: ${iterator.name})`,
+        );
+        console.log(
+          `   Target day: ${targetDay} (${tomorrowDate.format("dddd")}) - ${targetDayName}`,
+        );
+        console.log(`   Schedule days exists:`, !!vehicle.schedule_days);
+        console.log(`   Schedule days:`, JSON.stringify(vehicle.schedule_days));
+
+        if (!vehicle.schedule_days || vehicle.schedule_days.length === 0) {
+          console.log(
+            `   ⚠️ No schedule days defined for this vehicle, skipping`,
+          );
+          continue;
+        }
+
+        let isMatchFound = false;
+
+        // Handle different formats of schedule_days
+        if (Array.isArray(vehicle.schedule_days)) {
+          // Check if it's an array of objects with .value property
+          if (
+            vehicle.schedule_days[0] &&
+            typeof vehicle.schedule_days[0] === "object" &&
+            "value" in vehicle.schedule_days[0]
+          ) {
+            // Format: [{day: "Mon", value: 1}, {day: "Tue", value: 2}]
+            isMatchFound = vehicle.schedule_days.some(
+              (e) => e.value == targetDay,
+            );
           }
-        });
-        if (currentDayIncluded.length) {
+          // Check if it's an array of strings like ["Mon,Tue,Wed"]
+          else if (
+            vehicle.schedule_days[0] &&
+            typeof vehicle.schedule_days[0] === "string"
+          ) {
+            // Format: ["Mon,Tue,Wed,Thu,Fri,Sat,Sun"]
+            const daysString = vehicle.schedule_days.join(",");
+            isMatchFound = daysString.includes(targetDayName);
+            console.log(
+              `   Checking if "${daysString}" includes "${targetDayName}": ${isMatchFound}`,
+            );
+          }
+        }
+
+        console.log(`   Match found:`, isMatchFound);
+
+        if (isMatchFound) {
+          console.log(`✅ Weekly schedule matched for vehicle ${vehicle._id}`);
           jobs.push({
             scheduleId,
             vehicle: vehicle._id,
@@ -94,9 +157,11 @@ cron.run = async () => {
             ...(vehicle.worker ? { worker: vehicle.worker } : {}),
             location: iterator.location,
             building: iterator.building._id,
-            createdBy: "Cron Scheduler",
+            createdBy: isManualRun ? "Manual Scheduler" : "Cron Scheduler",
             ...(iterator.building.schedule_today ? { immediate: true } : null),
           });
+        } else {
+          console.log(`   ❌ No matching day found for vehicle ${vehicle._id}`);
         }
       }
     }
@@ -108,4 +173,10 @@ cron.run = async () => {
   } else {
     console.log("Assign jobs completed. No jobs generated.");
   }
+
+  return {
+    jobsGenerated: jobs.length,
+    targetDate: tomorrowDate.format("YYYY-MM-DD"),
+    runTime: moment().tz("Asia/Dubai").format(),
+  };
 };

@@ -1,11 +1,15 @@
 const router = require("express").Router();
 const controller = require("./customers.controller");
+const { getFilterCounts } = require("./getFilterCounts");
 const AuthHelper = require("../auth/auth.helper");
 const UploadHelper = require("../../../helpers/upload.helper");
 
 // ---------------------------------------------------------
 // 1. STATIC & SPECIAL ROUTES (Put these FIRST)
 // ---------------------------------------------------------
+
+// Fast filter counts endpoint (no pending dues calculation)
+router.get("/filter-counts", AuthHelper.authenticate, getFilterCounts);
 
 // Excel Export/Import
 router.get("/export/list", AuthHelper.authenticate, controller.exportData);

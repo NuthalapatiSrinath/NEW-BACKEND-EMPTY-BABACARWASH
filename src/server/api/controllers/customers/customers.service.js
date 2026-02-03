@@ -8,9 +8,9 @@ const PaymentsModel = require("../../models/payments.model");
 const CounterService = require("../../../utils/counters");
 const CommonHelper = require("../../../helpers/common.helper");
 const JobsService = require("../../staff/jobs/jobs.service");
+const mongoose = require("mongoose");
 const JobsModel = require("../../models/jobs.model");
 const moment = require("moment");
-const mongoose = require("mongoose");
 const service = module.exports;
 
 // ---------------------------------------------------------
@@ -33,6 +33,55 @@ service.list = async (userInfo, query) => {
     "Query:",
     findQuery,
   );
+
+  // Add Building Filter
+  if (query.building) {
+    findQuery.building = query.building;
+    console.log("🏢 [CUSTOMER LIST] Filtering by building:", query.building);
+  }
+
+  // Add Worker Filter (worker is on vehicle level)
+  // Use $elemMatch to ensure at least one vehicle has this specific worker assigned (not null)
+  if (query.worker) {
+    if (query.worker === "__ANY_WORKER__") {
+      // Special case: show only customers with at least one vehicle that has ANY worker assigned
+      findQuery.vehicles = {
+        $elemMatch: {
+          worker: { $exists: true, $ne: null },
+        },
+      };
+      console.log("👷 [CUSTOMER LIST] Filtering by ANY worker assigned");
+    } else {
+      // Specific worker filter - handle both ObjectId and string comparison
+      const workerString = query.worker.toString();
+      const workerObjectId = mongoose.Types.ObjectId.isValid(query.worker)
+        ? new mongoose.Types.ObjectId(query.worker)
+        : null;
+
+      // Match either string or ObjectId representation
+      if (workerObjectId) {
+        findQuery.vehicles = {
+          $elemMatch: {
+            $or: [{ worker: workerObjectId }, { worker: workerString }],
+          },
+        };
+      } else {
+        findQuery.vehicles = {
+          $elemMatch: {
+            worker: workerString,
+          },
+        };
+      }
+      console.log(
+        "👷 [CUSTOMER LIST] Filtering by specific worker:",
+        query.worker,
+        "String:",
+        workerString,
+        "ObjectId:",
+        workerObjectId,
+      );
+    }
+  }
 
   if (search) {
     const searchRegex = { $regex: search, $options: "i" };
@@ -120,6 +169,18 @@ service.list = async (userInfo, query) => {
     .skip(paginationData.skip)
     .limit(paginationData.limit)
     .lean();
+
+  console.log("\n🔍 [DEBUG] First 3 customers returned from query:");
+  data.slice(0, 3).forEach((customer, idx) => {
+    console.log(`  Customer ${idx + 1}:`, customer._id);
+    console.log(`    Name: ${customer.firstName} ${customer.lastName}`);
+    console.log(`    Vehicles count: ${customer.vehicles?.length || 0}`);
+    customer.vehicles?.forEach((v, vIdx) => {
+      console.log(
+        `      Vehicle ${vIdx + 1}: ${v.registration_no}, Worker: ${v.worker}`,
+      );
+    });
+  });
 
   // Populate References (Building & Worker)
   for (let customer of data) {
@@ -1166,12 +1227,13 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
     const email = getCellText(row.getCell(4));
     const registration_no = getCellText(row.getCell(5));
     const parking_no = getCellText(row.getCell(6));
-    const schedule_type = getCellText(row.getCell(7));
-    const schedule_days = getCellText(row.getCell(8));
-    const amount = getCellText(row.getCell(9));
-    const advance_amount = getCellText(row.getCell(10));
-    const start_date = row.getCell(11).value;
-    const onboard_date = row.getCell(12).value; // Read onboard_date from column 12
+    const flat_no = getCellText(row.getCell(7));
+    const schedule_type = getCellText(row.getCell(8));
+    const schedule_days = getCellText(row.getCell(9));
+    const amount = getCellText(row.getCell(10));
+    const advance_amount = getCellText(row.getCell(11));
+    const start_date = row.getCell(12).value;
+    const onboard_date = row.getCell(13).value; // Read onboard_date from column 13
 
     console.log(
       `🔍 Reading Row ${rowNumber}: ${firstName} ${lastName}, Mobile="${mobile}", Vehicle="${registration_no}"`,
@@ -1190,6 +1252,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       email,
       registration_no,
       parking_no,
+      flat_no,
       schedule_type,
       schedule_days,
       amount,
@@ -1250,6 +1313,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
           firstName: row.firstName || "",
           lastName: row.lastName || "",
           email: row.email,
+          flat_no: row.flat_no || "",
           vehicles: [],
         });
       }
@@ -1301,6 +1365,9 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         }
         if (customerData.email) {
           customer.email = customerData.email;
+        }
+        if (customerData.flat_no) {
+          customer.flat_no = customerData.flat_no;
         }
 
         // ✅ FIX: Ensure customer status is active during import
@@ -1418,7 +1485,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
           lastName: customerData.lastName || "",
           mobile: mobile,
           email: customerData.email || "",
-          flat_no: "",
+          flat_no: customerData.flat_no || "",
           building: null,
           location: null,
           vehicles: vehiclesToAdd,

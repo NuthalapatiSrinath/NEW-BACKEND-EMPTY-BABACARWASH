@@ -12,6 +12,7 @@ router.get(
   AuthHelper.authenticate,
   controller.monthlyStatement,
 );
+router.post("/run-scheduler", AuthHelper.authenticate, controller.runScheduler);
 
 // ✅ Dynamic Parameter Routes LAST
 // (This prevents "export" from being caught as an ":id")

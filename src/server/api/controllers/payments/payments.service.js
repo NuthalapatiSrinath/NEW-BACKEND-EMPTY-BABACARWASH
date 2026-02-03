@@ -710,7 +710,7 @@ service.monthlyStatement = async (userInfo, query) => {
           ? "Daily"
           : `Weekly (${vehicle.schedule_days?.length || 0})`
         : "-", // 7. Weekly Schedule
-      advance: vehicle?.advance_amount ? "Yes" : "No", // 8. Advance Payment Option
+      advance: vehicle?.advance_amount || 0, // 8. Advance Payment Amount (show actual amount instead of Yes/No)
       subAmount: subscriptionAmount, // 9. Subscription Amount
       prevDue: prevDue, // 10. Previous Payment Due
       totalDue: totalDue, // 11. Total Amount Due
@@ -734,6 +734,18 @@ service.monthlyStatement = async (userInfo, query) => {
       workerName: item.worker?.name || "Unassigned",
     };
   };
+
+  // Log sample record for debugging
+  if (data.length > 0) {
+    const sample = formatRecord(data[0], 0);
+    console.log("📄 [COLLECTION SHEET] Sample Record:");
+    console.log("   - Advance Amount:", sample.advance);
+    console.log("   - Vehicle Data:", data[0].vehicle);
+    console.log(
+      "   - Vehicle advance_amount:",
+      data[0].vehicle?.advance_amount,
+    );
+  }
 
   // --- A. JSON RESPONSE (For Frontend PDF Generation) ---
   if (query.format === "json") {
@@ -1383,7 +1395,7 @@ service.monthlyStatement = async (userInfo, query) => {
           ? "Daily"
           : `Weekly (${vehicle.schedule_days?.length || 0})`
         : "-",
-      advance: vehicle?.advance_amount ? "Yes" : "No",
+      advance: vehicle?.advance_amount || 0,
       subAmount: subscriptionAmount,
       prevDue: prevDue,
       totalDue: totalDue,

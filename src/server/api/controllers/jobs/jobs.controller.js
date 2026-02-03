@@ -126,3 +126,70 @@ controller.monthlyStatement = async (req, res) => {
       .json({ status: false, message: "Internal server error", error });
   }
 };
+
+controller.runScheduler = async (req, res) => {
+  try {
+    const { targetDate } = req.body;
+    console.log("🚀 [Run Scheduler] Request received");
+    console.log("📅 Target Date:", targetDate || "default (tomorrow)");
+
+    const jobsCron = require("../../../../scripts/crons/jobs");
+
+    // Check if jobs already exist for the target date
+    const moment = require("moment-timezone");
+    const JobsModel = require("../../models/jobs.model");
+
+    console.log("✅ Modules loaded successfully");
+
+    const checkDate = targetDate
+      ? moment.tz(targetDate, "Asia/Dubai").startOf("day")
+      : moment().tz("Asia/Dubai").startOf("day").add(1, "day");
+
+    console.log(
+      "🔍 Checking for existing jobs on:",
+      checkDate.format("YYYY-MM-DD"),
+    );
+
+    const existingJobs = await JobsModel.countDocuments({
+      assignedDate: {
+        $gte: checkDate.toDate(),
+        $lt: checkDate.clone().add(1, "day").toDate(),
+      },
+      createdBy: { $in: ["Cron Scheduler", "Manual Scheduler"] },
+      isDeleted: { $ne: true }, // Only count non-deleted jobs
+    });
+
+    console.log("📊 Existing jobs count:", existingJobs);
+
+    if (existingJobs > 0) {
+      console.log("⚠️ Jobs already exist, blocking duplicate creation");
+      return res.status(400).json({
+        statusCode: 400,
+        message: `Jobs already exist for ${checkDate.format("YYYY-MM-DD")} (${existingJobs} jobs found). Cannot create duplicates.`,
+        jobsGenerated: 0,
+        existingJobs,
+      });
+    }
+
+    console.log("✨ Running scheduler...");
+    // Run the scheduler
+    const result = await jobsCron.run(targetDate);
+
+    console.log("✅ Scheduler completed successfully");
+    console.log("📈 Jobs generated:", result.jobsGenerated);
+
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Scheduler executed successfully",
+      ...result,
+    });
+  } catch (error) {
+    console.error("❌ [Scheduler Error]:", error);
+    console.error("Stack:", error.stack);
+    return res.status(500).json({
+      statusCode: 500,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};

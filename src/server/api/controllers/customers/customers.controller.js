@@ -396,6 +396,7 @@ controller.downloadTemplate = async (req, res) => {
       { header: "Email", key: "email", width: 25 },
       { header: "Vehicle Registration No*", key: "registration_no", width: 20 },
       { header: "Parking No", key: "parking_no", width: 15 },
+      { header: "Flat No (Optional)", key: "flat_no", width: 18 },
       {
         header: "Schedule Type* (daily/weekly/onetime)",
         key: "schedule_type",
@@ -416,6 +417,7 @@ controller.downloadTemplate = async (req, res) => {
       email: "john@example.com",
       registration_no: "ABC123",
       parking_no: "P-101",
+      flat_no: "A-304",
       schedule_type: "daily",
       schedule_days: "Monday,Tuesday,Wednesday,Thursday,Friday",
       amount: "300",
@@ -432,6 +434,7 @@ controller.downloadTemplate = async (req, res) => {
       email: "john@example.com",
       registration_no: "XYZ789", // Different vehicle
       parking_no: "P-102",
+      flat_no: "A-304",
       schedule_type: "weekly",
       schedule_days: "Monday,Wednesday,Friday",
       amount: "250",
@@ -448,6 +451,7 @@ controller.downloadTemplate = async (req, res) => {
       email: "jane@example.com",
       registration_no: "LMN456",
       parking_no: "P-201",
+      flat_no: "",
       schedule_type: "onetime",
       schedule_days: "",
       amount: "150",
