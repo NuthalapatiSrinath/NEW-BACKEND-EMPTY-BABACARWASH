@@ -743,7 +743,7 @@ service.monthlyRecords = async (userInfo, query) => {
   const jobsQuery = {
     isDeleted: false,
     status: "completed",
-    completedDate: { $gte: startDate.toDate(), $lte: endDate.toDate() },
+    assignedDate: { $gte: startDate.toDate(), $lte: endDate.toDate() },
     worker: { $exists: true, $ne: null },
   };
 

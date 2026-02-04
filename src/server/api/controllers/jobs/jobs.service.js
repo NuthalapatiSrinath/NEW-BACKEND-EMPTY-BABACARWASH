@@ -228,9 +228,19 @@ service.update = async (userInfo, id, payload) => {
   if (payload.worker === "") payload.worker = null;
   if (payload.customer === "") payload.customer = null;
 
-  // Set completedDate when status changes to completed
+  // CRITICAL: Never allow assignedDate to be modified when updating a job
+  // The scheduled date should remain fixed throughout the job lifecycle
+  if (payload.assignedDate) {
+    delete payload.assignedDate;
+  }
+
+  // When marking job as complete, set completedDate to match assignedDate
+  // This ensures the date stays consistent (e.g., if scheduled for 20th, completed date is also 20th)
   if (payload.status === "completed" && !payload.completedDate) {
-    payload.completedDate = new Date();
+    const job = await JobsModel.findById(id).lean();
+    if (job && job.assignedDate) {
+      payload.completedDate = job.assignedDate;
+    }
   }
 
   await JobsModel.updateOne({ _id: id }, { $set: payload });
