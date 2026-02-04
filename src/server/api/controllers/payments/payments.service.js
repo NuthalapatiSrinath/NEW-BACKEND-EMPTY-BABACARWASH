@@ -932,9 +932,10 @@ service.closeMonth = async (userInfo, month, year) => {
       );
     }
 
-    // Start and end of target month
-    const monthStart = new Date(targetYear, targetMonth, 1);
-    const monthEnd = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59, 999);
+    // ✅ FIXED: Create dates in IST timezone (UTC+5:30) to match how bills are stored
+    // December 1st 2025 00:00 IST = November 30th 2025 18:30 UTC
+    const monthStart = new Date(Date.UTC(targetYear, targetMonth, 1, 0, 0, 0, 0) - (5.5 * 60 * 60 * 1000));
+    const monthEnd = new Date(Date.UTC(targetYear, targetMonth + 1, 0, 23, 59, 59, 999) - (5.5 * 60 * 60 * 1000));
 
     console.log("\n📅 Date Range Calculation:");
     console.log(
