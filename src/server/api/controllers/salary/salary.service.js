@@ -26,6 +26,34 @@ service.calculateOrUpdateSlip = async (
 
   const settings = await SalarySettingsService.getSettings();
 
+  // ==================== DEBUGGING CONSOLE LOGS ====================
+  console.log("\n");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("🧮 SALARY SLIP CALCULATION STARTED");
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("📅 Period:", `${month + 1}/${year}`);
+  console.log("👤 Worker ID:", workerId);
+  console.log("👤 Worker Name:", worker.name);
+  console.log("\n--- WORKER MODEL FIELDS AVAILABLE ---");
+  console.log("🔸 worker.role:", worker.role || "❌ NOT SET");
+  console.log("🔸 worker.subRole:", worker.subRole || "❌ NOT SET");
+  console.log("🔸 worker.location:", worker.location || "❌ NOT SET");
+  console.log("🔸 worker.service_type:", worker.service_type || "❌ NOT SET");
+  console.log("🔸 worker.employeeCode:", worker.employeeCode || "N/A");
+  console.log("\n--- SALARY SETTINGS LOADED FROM DB ---");
+  console.log("💰 carWash.dayDuty.ratePerCar:", settings.carWash.dayDuty.ratePerCar);
+  console.log("💰 carWash.nightDuty.ratePerCar:", settings.carWash.nightDuty.ratePerCar);
+  console.log("💰 mall.oneWashRate:", settings.mall.oneWashRate);
+  console.log("💰 mall.monthlyRate:", settings.mall.monthlyRate);
+  console.log("💰 camp.helper.baseSalary:", settings.camp.helper.baseSalary);
+  console.log("💰 camp.helper.overtimeRate:", settings.camp.helper.overtimeRate);
+  console.log("💰 camp.mason.baseSalary:", settings.camp.mason.baseSalary);
+  console.log("💰 camp.mason.overtimeRate:", settings.camp.mason.overtimeRate);
+  console.log("💰 etisalat.employeeBaseDeduction:", settings.etisalat.employeeBaseDeduction);
+  console.log("\n--- MANUAL INPUTS PROVIDED ---");
+  console.log("✏️ Manual Inputs:", JSON.stringify(manualInputs, null, 2));
+  console.log("═══════════════════════════════════════════════════════════\n");
+
   // Date Range
   const startDate = moment({ year, month }).startOf("month");
   const endDate = moment({ year, month }).endOf("month");
@@ -83,13 +111,18 @@ service.calculateOrUpdateSlip = async (
   let earnings = { basic: 0, incentive: 0, allowance: 0, ot: 0 };
   let breakdown = { method: "Standard", ratesUsed: {} };
 
-  // Determine Worker Role & Location
-  // Ensure your Worker Model has a 'role' field. Defaulting to 'carwash' if missing.
-  const workerType = worker.role || "carwash";
+  // Determine Worker Type Based on service_type field
+  // service_type: "mall", "residence", "site", "mobile"
+  const workerType = worker.service_type || "residence";
   const location = worker.location || "";
 
+  console.log("\n🔍 DETERMINING CALCULATION METHOD:");
+  console.log("➡️ Worker service_type:", worker.service_type);
+  console.log("➡️ Worker Type for Calc:", workerType);
+  console.log("➡️ Location:", location || "Not specified");
+
   // === LOGIC A: CAR WASH EMPLOYEES (RESIDENTIAL) ===
-  if (workerType === "carwash") {
+  if (workerType === "residence") {
     // Check Location for Day Duty vs Night Duty
     const dayDutyBuildings = settings.carWash.dayDuty.applicableBuildings || [];
     const isDayDuty = dayDutyBuildings.some((b) => location.includes(b));
@@ -112,6 +145,13 @@ service.calculateOrUpdateSlip = async (
       : "Residential Night Duty";
     breakdown.totalCars = totalWashes;
     breakdown.rate = config.ratePerCar;
+
+    console.log("\n✅ USING: CAR WASH LOGIC");
+    console.log("📊 Method:", breakdown.method);
+    console.log("🚗 Total Cars:", totalWashes);
+    console.log("💵 Rate Used:", config.ratePerCar);
+    console.log("💰 Basic Earnings:", earnings.basic.toFixed(2));
+    console.log("🎁 Incentive:", earnings.incentive.toFixed(2));
   }
 
   // === LOGIC B: MALL EMPLOYEES ===
@@ -135,10 +175,17 @@ service.calculateOrUpdateSlip = async (
     breakdown.oneWashPay = payOneWash;
     breakdown.monthlyPay = payMonthly;
     breakdown.allowance = earnings.allowance.toFixed(2);
+
+    console.log("\n✅ USING: MALL LOGIC");
+    console.log("📊 Method:", breakdown.method);
+    console.log("🚗 OneWash Count:", oneWashCount, "@ Rate:", settings.mall.oneWashRate);
+    console.log("📅 Subscription Count:", subscriptionCount, "@ Rate:", settings.mall.monthlyRate);
+    console.log("💰 Basic Earnings:", earnings.basic.toFixed(2));
+    console.log("🎁 Allowance:", earnings.allowance.toFixed(2));
   }
 
-  // === LOGIC C: CAMP EMPLOYEES ===
-  else if (workerType === "camp" || workerType === "constructionCamp") {
+  // === LOGIC C: CAMP/SITE EMPLOYEES ===
+  else if (workerType === "site") {
     const role = worker.subRole || "helper"; // 'helper' or 'mason'
     const roleConfig = settings.camp[role] || settings.camp.helper;
     const general = settings.camp.settings;
@@ -163,8 +210,45 @@ service.calculateOrUpdateSlip = async (
       earnings.incentive = general.monthlyIncentive;
     }
 
-    breakdown.method = `Camp - ${role}`;
+    breakdown.method = `Camp/Site - ${role}`;
     presentDaysCount = daysPresent; // Override auto-calc for camp
+
+    console.log("\n✅ USING: CAMP/SITE LOGIC");
+    console.log("📊 Method:", breakdown.method);
+    console.log("👷 Role:", role);
+    console.log("💰 Base Salary Rate:", roleConfig.baseSalary);
+    console.log("⏰ OT Rate:", roleConfig.overtimeRate);
+    console.log("📅 Days Present:", daysPresent);
+    console.log("⏱️ OT Hours:", otHours);
+    console.log("💰 Basic Earnings:", earnings.basic.toFixed(2));
+    console.log("⏰ OT Earnings:", earnings.ot.toFixed(2));
+    console.log("🎁 Incentive:", earnings.incentive.toFixed(2));
+  }
+
+  // === LOGIC D: MOBILE WORKERS (treat as residence for now) ===
+  else if (workerType === "mobile") {
+    // Mobile workers are typically residence workers doing mobile car wash
+    // Use same logic as residence
+    const config = settings.carWash.nightDuty; // Default to night duty rates
+
+    earnings.basic = totalWashes * config.ratePerCar;
+
+    if (totalWashes < config.incentiveThreshold) {
+      earnings.incentive = config.incentiveLow;
+    } else {
+      earnings.incentive = config.incentiveHigh;
+    }
+
+    breakdown.method = "Mobile Car Wash";
+    breakdown.totalCars = totalWashes;
+    breakdown.rate = config.ratePerCar;
+
+    console.log("\n✅ USING: MOBILE LOGIC");
+    console.log("📊 Method:", breakdown.method);
+    console.log("🚗 Total Cars:", totalWashes);
+    console.log("💵 Rate Used:", config.ratePerCar);
+    console.log("💰 Basic Earnings:", earnings.basic.toFixed(2));
+    console.log("🎁 Incentive:", earnings.incentive.toFixed(2));
   }
 
   // === DEDUCTIONS ===
@@ -210,6 +294,20 @@ service.calculateOrUpdateSlip = async (
   const totalDeductions =
     simDeduction + advance + otherDeduction + lastMonthBalance;
   const netSalary = totalEarnings - totalDeductions;
+
+  console.log("\n💸 FINAL CALCULATIONS:");
+  console.log("➕ Total Earnings:", totalEarnings.toFixed(2));
+  console.log("   - Basic:", earnings.basic.toFixed(2));
+  console.log("   - Incentive:", earnings.incentive.toFixed(2));
+  console.log("   - Allowance:", earnings.allowance.toFixed(2));
+  console.log("   - OT:", earnings.ot.toFixed(2));
+  console.log("➖ Total Deductions:", totalDeductions.toFixed(2));
+  console.log("   - SIM:", simDeduction.toFixed(2));
+  console.log("   - Advance:", advance);
+  console.log("   - Other:", otherDeduction);
+  console.log("   - Last Month:", lastMonthBalance);
+  console.log("💰 NET SALARY:", netSalary.toFixed(2));
+  console.log("═══════════════════════════════════════════════════════════\n");
 
   // --- 5. Prepare Data Object ---
   return {
