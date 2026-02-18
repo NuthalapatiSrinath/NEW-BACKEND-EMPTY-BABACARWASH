@@ -248,11 +248,11 @@ service.list = async (userInfo, query) => {
 
         // Compute display_service_type for onewash payments
         let display_service_type = payment.service_type;
-        
+
         if (payment.onewash) {
           // Look up the OneWash job to get wash_type
           let job = null;
-          
+
           if (payment.job) {
             job = await OneWashModel.findOne({
               _id: payment.job,
@@ -261,7 +261,7 @@ service.list = async (userInfo, query) => {
               .select("wash_type service_type mall building")
               .lean();
           }
-          
+
           // Fallback: find by worker + vehicle + date
           if (!job && payment.vehicle?.registration_no && payment.worker) {
             const paymentDate = new Date(payment.createdAt);
@@ -269,9 +269,12 @@ service.list = async (userInfo, query) => {
             startDate.setHours(0, 0, 0, 0);
             const endDate = new Date(paymentDate);
             endDate.setHours(23, 59, 59, 999);
-            
+
             job = await OneWashModel.findOne({
-              worker: typeof payment.worker === 'object' ? payment.worker._id : payment.worker,
+              worker:
+                typeof payment.worker === "object"
+                  ? payment.worker._id
+                  : payment.worker,
               registration_no: payment.vehicle.registration_no,
               createdAt: { $gte: startDate, $lte: endDate },
               isDeleted: false,
@@ -279,14 +282,17 @@ service.list = async (userInfo, query) => {
               .select("wash_type service_type mall building")
               .lean();
           }
-          
+
           if (job) {
             if (job.service_type === "residence" || job.building) {
               display_service_type = "Residence";
             } else if (job.mall || payment.mall) {
-              const mallId = job.mall || 
-                (typeof payment.mall === "object" ? payment.mall._id : payment.mall);
-              
+              const mallId =
+                job.mall ||
+                (typeof payment.mall === "object"
+                  ? payment.mall._id
+                  : payment.mall);
+
               const pricing = await PricingModel.findOne({
                 mall: mallId,
                 isDeleted: false,
@@ -675,10 +681,12 @@ service.exportData = async (userInfo, query) => {
   // 3.5. Compute display_service_type for onewash payments
   const PricingModel = require("../../models/pricing.model");
   const OneWashModel = require("../../models/onewash.model");
-  
+
   console.log(`\n🔍 [EXPORT] Processing ${data.length} total payments`);
-  console.log(`🔍 [EXPORT] OneWash payments: ${data.filter(p => p.onewash).length}`);
-  
+  console.log(
+    `🔍 [EXPORT] OneWash payments: ${data.filter((p) => p.onewash).length}`,
+  );
+
   data = await Promise.all(
     data.map(async (payment, index) => {
       let display_service_type = "-";
@@ -697,7 +705,7 @@ service.exportData = async (userInfo, query) => {
 
         // For OneWash payments, look up the job to get wash_type
         let job = null;
-        
+
         if (payment.job) {
           job = await OneWashModel.findOne({
             _id: payment.job,
@@ -706,7 +714,7 @@ service.exportData = async (userInfo, query) => {
             .select("wash_type service_type mall building")
             .lean();
         }
-        
+
         // If job not found by ID, try to find by worker + vehicle + date range
         if (!job && payment.vehicle?.registration_no && payment.worker) {
           const paymentDate = new Date(payment.createdAt);
@@ -714,31 +722,39 @@ service.exportData = async (userInfo, query) => {
           startDate.setHours(0, 0, 0, 0);
           const endDate = new Date(paymentDate);
           endDate.setHours(23, 59, 59, 999);
-          
+
           job = await OneWashModel.findOne({
-            worker: typeof payment.worker === 'object' ? payment.worker._id : payment.worker,
+            worker:
+              typeof payment.worker === "object"
+                ? payment.worker._id
+                : payment.worker,
             registration_no: payment.vehicle.registration_no,
             createdAt: { $gte: startDate, $lte: endDate },
             isDeleted: false,
           })
             .select("wash_type service_type mall building")
             .lean();
-            
+
           if (job) {
             console.log(`   ✅ Job found by fallback lookup`);
           }
         }
 
-        console.log(`   Job found:`, job ? {
-          wash_type: job.wash_type,
-          service_type: job.service_type,
-          mall: job.mall,
-          building: job.building,
-        } : 'NOT FOUND');
+        console.log(
+          `   Job found:`,
+          job
+            ? {
+                wash_type: job.wash_type,
+                service_type: job.service_type,
+                mall: job.mall,
+                building: job.building,
+              }
+            : "NOT FOUND",
+        );
 
         if (job) {
           wash_type = job.wash_type;
-          
+
           if (job.service_type === "residence" || job.building) {
             display_service_type = "Residence";
           } else if (job.mall) {
@@ -749,9 +765,16 @@ service.exportData = async (userInfo, query) => {
               isDeleted: false,
             }).lean();
 
-            console.log(`   Pricing found:`, pricing ? {
-              hasSedanWashTypes: !!(pricing.sedan && pricing.sedan.wash_types),
-            } : 'NOT FOUND');
+            console.log(
+              `   Pricing found:`,
+              pricing
+                ? {
+                    hasSedanWashTypes: !!(
+                      pricing.sedan && pricing.sedan.wash_types
+                    ),
+                  }
+                : "NOT FOUND",
+            );
 
             if (pricing && pricing.sedan && pricing.sedan.wash_types) {
               // Mall has wash types configured - show actual wash type
@@ -768,7 +791,7 @@ service.exportData = async (userInfo, query) => {
               // Mall not configured - show "Mall"
               display_service_type = "Mall";
             }
-            
+
             console.log(`   ✅ Result: ${display_service_type}`);
           } else {
             display_service_type = "Mall";
@@ -776,7 +799,9 @@ service.exportData = async (userInfo, query) => {
         } else {
           // Job not found - fallback
           display_service_type = payment.building ? "Residence" : "Mall";
-          console.log(`   ⚠️ Job not found, using fallback: ${display_service_type}`);
+          console.log(
+            `   ⚠️ Job not found, using fallback: ${display_service_type}`,
+          );
         }
       } else {
         // Regular residence payments - use vehicle wash_type
@@ -797,7 +822,7 @@ service.exportData = async (userInfo, query) => {
       };
     }),
   );
-  
+
   console.log(`\n✅ [EXPORT] Processing complete\n`);
 
   // 4. Generate Excel
