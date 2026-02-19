@@ -1372,7 +1372,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         customer.status = 1;
         customer.isDeleted = false; // ✅ CRITICAL FIX: Undelete customers during import
 
-        // Process each vehicle: check globally and handle duplicates/transfers
+        // Process each vehicle: check globally and skip if exists
         for (const newVehicle of customerData.vehicles) {
           // Check if vehicle exists in THIS customer's vehicles
           const vehicleExistsInCurrentCustomer = customer.vehicles.some(
@@ -1398,23 +1398,10 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
 
           if (otherCustomerWithVehicle) {
             console.log(
-              `  🔄 Vehicle ${newVehicle.registration_no} found with different customer (Mobile: ${otherCustomerWithVehicle.mobile}), transferring...`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists with another customer (Mobile: ${otherCustomerWithVehicle.mobile}), skipped (no transfer)`,
             );
-
-            // Remove from old customer
-            otherCustomerWithVehicle.vehicles =
-              otherCustomerWithVehicle.vehicles.filter(
-                (v) =>
-                  v.registration_no.toLowerCase() !==
-                  newVehicle.registration_no.toLowerCase(),
-              );
-            await otherCustomerWithVehicle.save();
-
-            // Add to current customer
-            customer.vehicles.push(newVehicle);
-            console.log(
-              `  ✅ Vehicle ${newVehicle.registration_no} transferred successfully`,
-            );
+            // ✅ FIX: Don't transfer, just skip
+            continue;
           } else {
             // Vehicle doesn't exist anywhere, add it
             customer.vehicles.push(newVehicle);
@@ -1432,11 +1419,14 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         results.updated++; // Count customers updated
       } else {
         console.log(
-          `➕ Creating new customer: ${customerData.firstName} (Mobile: ${mobile}) with ${customerData.vehicles.length} vehicle(s)`,
+          `➕ Checking new customer: ${customerData.firstName} (Mobile: ${mobile}) with ${customerData.vehicles.length} vehicle(s)`,
         );
 
-        // Before creating new customer, check if any vehicles exist with other customers
+        // ✅ FIX: Before creating new customer, check if ANY vehicle already exists
+        // If all vehicles exist, don't create customer at all
         const vehiclesToAdd = [];
+        let hasExistingVehicles = false;
+        
         for (const newVehicle of customerData.vehicles) {
           // Check if vehicle exists with ANY customer
           const otherCustomerWithVehicle = await CustomersModel.findOne({
@@ -1447,49 +1437,47 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
 
           if (otherCustomerWithVehicle) {
             console.log(
-              `  🔄 Vehicle ${newVehicle.registration_no} found with customer (Mobile: ${otherCustomerWithVehicle.mobile}), transferring...`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists with customer (Mobile: ${otherCustomerWithVehicle.mobile}), skipped (no customer creation)`,
             );
-
-            // Remove from old customer
-            otherCustomerWithVehicle.vehicles =
-              otherCustomerWithVehicle.vehicles.filter(
-                (v) =>
-                  v.registration_no.toLowerCase() !==
-                  newVehicle.registration_no.toLowerCase(),
-              );
-            await otherCustomerWithVehicle.save();
-
-            vehiclesToAdd.push(newVehicle);
-            console.log(
-              `  ✅ Vehicle ${newVehicle.registration_no} will be transferred to new customer`,
-            );
+            hasExistingVehicles = true;
+            // ✅ FIX: Don't transfer, don't add to list
           } else {
-            // Vehicle doesn't exist, add it
+            // Vehicle doesn't exist, can add it
             vehiclesToAdd.push(newVehicle);
             console.log(
-              `  ➕ Vehicle ${newVehicle.registration_no} will be added as new`,
+              `  ✅ Vehicle ${newVehicle.registration_no} is new, will be added`,
             );
           }
         }
 
-        const id = await CounterService.id("customers");
-        const newCustomer = {
-          id,
-          firstName: customerData.firstName,
-          lastName: customerData.lastName || "",
-          mobile: mobile,
-          email: customerData.email || "",
-          flat_no: customerData.flat_no || "",
-          building: null,
-          location: null,
-          vehicles: vehiclesToAdd,
-          status: 1,
-          isDeleted: false, // ✅ Ensure new customers are not deleted
-          createdBy: userInfo._id,
-        };
+        // Only create customer if there are new vehicles to add
+        if (vehiclesToAdd.length > 0) {
+          const id = await CounterService.id("customers");
+          const newCustomer = {
+            id,
+            firstName: customerData.firstName,
+            lastName: customerData.lastName || "",
+            mobile: mobile,
+            email: customerData.email || "",
+            flat_no: customerData.flat_no || "",
+            building: null,
+            location: null,
+            vehicles: vehiclesToAdd,
+            status: 1,
+            isDeleted: false,
+            createdBy: userInfo._id,
+          };
 
-        await new CustomersModel(newCustomer).save();
-        results.created++; // Count customers created
+          await new CustomersModel(newCustomer).save();
+          results.created++;
+          console.log(
+            `  ✅ Created new customer with ${vehiclesToAdd.length} vehicle(s)`,
+          );
+        } else {
+          console.log(
+            `  ⚠️ Skipped creating customer - all vehicles already exist`,
+          );
+        }
       }
 
       results.success += customerData.vehicles.length;
