@@ -15,10 +15,18 @@ const schema = new mongoose.Schema(
     malls: [{ type: mongoose.Schema.Types.ObjectId, ref: "malls" }],
     sites: [{ type: mongoose.Schema.Types.ObjectId, ref: "sites" }], // ✅ Added Sites
 
-    // ✅ Updated Enum to include 'site' and 'mobile'
+    // ✅ Updated Enum to include 'site', 'mobile', 'driver', 'officestaff', 'supervisor'
     service_type: {
       type: String,
-      enum: ["mall", "residence", "site", "mobile"],
+      enum: [
+        "mall",
+        "residence",
+        "site",
+        "mobile",
+        "driver",
+        "officestaff",
+        "supervisor",
+      ],
       default: "residence",
     },
     role: {
