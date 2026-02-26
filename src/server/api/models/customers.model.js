@@ -18,6 +18,13 @@ const vehicleSchema = new mongoose.Schema(
     deactivateDate: { type: Date },
     reactivateDate: { type: Date },
     vehicle_type: { type: String },
+    brandId: { type: mongoose.Schema.Types.ObjectId, ref: "vehicle_brands" },
+    brandName: { type: String },
+    modelId: { type: mongoose.Schema.Types.ObjectId, ref: "vehicle_models" },
+    modelName: { type: String },
+    modelImage: { type: String },
+    category: { type: String },
+    vehicleName: { type: String },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
 );

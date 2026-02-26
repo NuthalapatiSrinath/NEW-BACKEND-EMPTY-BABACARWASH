@@ -7,6 +7,64 @@ const smsService = require("./sms.service");
 const service = module.exports;
 
 /**
+ * Country code prefixes for flexible phone number matching
+ */
+const COUNTRY_CODES = [
+  "971",
+  "91",
+  "966",
+  "974",
+  "965",
+  "973",
+  "968",
+  "92",
+  "880",
+  "63",
+];
+
+/**
+ * Find customer by mobile number with flexible matching
+ * Tries: exact match, without country code, with different country codes
+ */
+service.findCustomerByMobile = async (mobile) => {
+  // Normalize: remove + and spaces
+  const normalizedMobile = mobile.replace(/[\s+\-]/g, "");
+
+  // Try exact match first
+  let customer = await CustomersModel.findOne({ mobile: normalizedMobile });
+  if (customer) return { customer, matchedMobile: normalizedMobile };
+
+  // Try with leading zeros stripped
+  const noLeadingZero = normalizedMobile.replace(/^0+/, "");
+  if (noLeadingZero !== normalizedMobile) {
+    customer = await CustomersModel.findOne({ mobile: noLeadingZero });
+    if (customer) return { customer, matchedMobile: noLeadingZero };
+  }
+
+  // Try extracting local number by stripping country codes
+  for (const code of COUNTRY_CODES) {
+    if (normalizedMobile.startsWith(code)) {
+      const localNumber = normalizedMobile.slice(code.length);
+      customer = await CustomersModel.findOne({ mobile: localNumber });
+      if (customer) return { customer, matchedMobile: localNumber };
+    }
+  }
+
+  // Try matching last 9-10 digits (common mobile length)
+  if (normalizedMobile.length > 10) {
+    const last10 = normalizedMobile.slice(-10);
+    customer = await CustomersModel.findOne({ mobile: last10 });
+    if (customer) return { customer, matchedMobile: last10 };
+
+    const last9 = normalizedMobile.slice(-9);
+    customer = await CustomersModel.findOne({ mobile: last9 });
+    if (customer) return { customer, matchedMobile: last9 };
+  }
+
+  return { customer: null, matchedMobile: normalizedMobile };
+};
+
+/**
  * Generate a random 6-digit OTP
  */
 service.generateOTP = () => {
@@ -15,13 +73,13 @@ service.generateOTP = () => {
 
 /**
  * Send OTP to customer mobile
- * For now, just saves OTP to database
- * TODO: Integrate SMS gateway (Twilio, MSG91, etc.)
+ * Supports international format with flexible matching
  */
 service.sendOTP = async (mobile) => {
   try {
-    // Check if customer exists
-    const customer = await CustomersModel.findOne({ mobile });
+    // Find customer with flexible matching
+    const { customer, matchedMobile } =
+      await service.findCustomerByMobile(mobile);
     if (!customer) {
       throw "CUSTOMER_NOT_FOUND";
     }
@@ -35,17 +93,18 @@ service.sendOTP = async (mobile) => {
     const otp = service.generateOTP();
     const expiresAt = moment().add(5, "minutes").toDate();
 
-    // Save OTP to database
+    // Save OTP using the original mobile number sent (for verification)
+    const normalizedMobile = mobile.replace(/[\s+\-]/g, "");
     await new OTPModel({
-      mobile,
+      mobile: normalizedMobile,
       otp,
       expiresAt,
       verified: false,
     }).save();
 
-    // Send SMS via configured gateway
+    // Send SMS via configured gateway (use full international number for SMS)
     try {
-      await smsService.sendOTP(mobile, otp);
+      await smsService.sendOTP(normalizedMobile, otp);
     } catch (smsError) {
       console.error("SMS sending error:", smsError);
       // Continue even if SMS fails - OTP is still valid
@@ -63,12 +122,16 @@ service.sendOTP = async (mobile) => {
 
 /**
  * Verify OTP and return auth token
+ * Supports international format with flexible matching
  */
 service.verifyOTP = async (mobile, otp) => {
   try {
+    // Normalize mobile number
+    const normalizedMobile = mobile.replace(/[\s+\-]/g, "");
+
     // Find the latest OTP for this mobile
     const otpRecord = await OTPModel.findOne({
-      mobile,
+      mobile: normalizedMobile,
       otp: parseInt(otp),
       verified: false,
     }).sort({ createdAt: -1 });
@@ -86,8 +149,8 @@ service.verifyOTP = async (mobile, otp) => {
     otpRecord.verified = true;
     await otpRecord.save();
 
-    // Get customer data
-    const customer = await CustomersModel.findOne({ mobile });
+    // Get customer data using flexible matching
+    const { customer } = await service.findCustomerByMobile(normalizedMobile);
     if (!customer) {
       throw "CUSTOMER_NOT_FOUND";
     }
@@ -113,10 +176,12 @@ service.verifyOTP = async (mobile, otp) => {
 /**
  * Login with password "00" for existing customers
  * OR verify actual password if set
+ * Supports international format with flexible matching
  */
 service.loginWithPassword = async (mobile, password) => {
   try {
-    const customer = await CustomersModel.findOne({ mobile });
+    // Find customer with flexible matching
+    const { customer } = await service.findCustomerByMobile(mobile);
     if (!customer) {
       throw "UNAUTHORIZED";
     }

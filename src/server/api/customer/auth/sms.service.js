@@ -35,34 +35,53 @@ const smsService = module.exports;
  */
 smsService.sendViaTwilio = async (mobile, otp) => {
   try {
-    // Uncomment after installing twilio package and setting up credentials
-    /*
-    const twilio = require('twilio');
-    const client = twilio(
-      process.env.TWILIO_ACCOUNT_SID,
-      process.env.TWILIO_AUTH_TOKEN
-    );
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+
+    // Check if Twilio credentials are configured
+    if (
+      !accountSid ||
+      !authToken ||
+      !fromNumber ||
+      accountSid === "your_twilio_account_sid_here"
+    ) {
+      console.log(
+        `📱 [TWILIO] Credentials not configured. OTP for ${mobile}: ${otp}`,
+      );
+      return {
+        success: true,
+        provider: "twilio-dev",
+        message: "OTP logged to console (Twilio not configured)",
+      };
+    }
+
+    const twilio = require("twilio");
+    const client = twilio(accountSid, authToken);
+
+    // Format phone number - ensure it has + prefix
+    let toNumber = mobile.toString().trim();
+    if (!toNumber.startsWith("+")) {
+      toNumber = `+${toNumber}`;
+    }
 
     const message = await client.messages.create({
-      body: `Your BCW verification code is: ${otp}. Valid for 5 minutes.`,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to: `+91${mobile}` // Adjust country code as needed
+      body: `Your Baba Car Wash verification code is: ${otp}. Valid for 5 minutes. Do not share this code.`,
+      from: fromNumber,
+      to: toNumber,
     });
 
-    console.log(`✅ SMS sent via Twilio to ${mobile}, SID: ${message.sid}`);
-    return { success: true, provider: 'twilio', sid: message.sid };
-    */
-
-    // For now, just log to console
-    console.log(`📱 [TWILIO] Would send SMS to ${mobile}: OTP ${otp}`);
+    console.log(`✅ SMS sent via Twilio to ${toNumber}, SID: ${message.sid}`);
+    return { success: true, provider: "twilio", sid: message.sid };
+  } catch (error) {
+    console.error("❌ Twilio SMS error:", error.message);
+    // Log OTP to console as fallback so user doesn't get locked out
+    console.log(`📱 [TWILIO FALLBACK] OTP for ${mobile}: ${otp}`);
     return {
       success: true,
-      provider: "twilio-dev",
-      message: "OTP logged to console",
+      provider: "twilio-fallback",
+      message: `SMS failed (${error.message}), OTP logged to console`,
     };
-  } catch (error) {
-    console.error("Twilio SMS error:", error);
-    throw error;
   }
 };
 

@@ -10,9 +10,11 @@ router.post("/send-otp", controller.sendOTP);
 router.post("/verify-otp", controller.verifyOTP);
 router.post("/login-password", controller.loginWithPassword);
 
-router.post("/forgot-password", controller.forgotPassword);
-router.post("/reset-password", controller.resetPassword);
-
 router.get("/me", AuthHelper.authenticate, controller.me);
+router.put(
+  "/update-profile",
+  AuthHelper.authenticate,
+  controller.updateProfile,
+);
 
 module.exports = router;

@@ -23,5 +23,6 @@ router.use("/admin/staff", require("./staff"));
 
 // ✅ FIXED: Added require()
 router.use("/salary", require("./salary"));
+router.use("/vehicle-catalog", require("./vehicle-catalog"));
 
 module.exports = router;

@@ -1,14 +1,8 @@
-const moment = require("moment");
-const uuidV4 = require("uuid/v4");
-const config = require("../../../utils/config");
 const CustomersModel = require("../../models/customers.model");
 const JobsModel = require("../../models/jobs.model");
-const OTPModel = require("../../models/otps.model");
-const AuthTokensModel = require("../../models/auth-tokens.model");
-const CommonHelper = require("../../../helpers/common.helper");
+const LocationsModel = require("../../controllers/locations/locations.model");
+const BuildingsModel = require("../../models/buildings.model");
 const AuthHelper = require("./auth.helper");
-const EmailNotifications = require("../../../notifications/email.notifications");
-const Events = require("../../../hooks/signup.event");
 const service = module.exports;
 
 service.signup = async (payload) => {
@@ -60,62 +54,6 @@ service.signin = async (payload) => {
   }
 };
 
-service.forgotPassword = async (payload) => {
-  try {
-    const userData = await CustomersModel.findOne({
-      email: payload.email,
-    }).lean();
-
-    if (!userData) {
-      throw "INVALID";
-    }
-
-    const token = uuidV4();
-    await new AuthTokensModel({
-      user: userData._id,
-      type: "password-reset",
-      token,
-      expiresAt: moment().subtract("day", 1),
-    }).save();
-    EmailNotifications.forgotPasswordLink({
-      ...userData,
-      resetLink: `${config.redirectUrls.resetPassword}?token=${token}`,
-    });
-  } catch (error) {
-    throw error;
-  }
-};
-
-service.resetPassword = async (payload) => {
-  try {
-    const tokenData = await AuthTokensModel.findOne({
-      token: payload.token,
-      consumed: false,
-    })
-      .populate("user")
-      .lean();
-
-    if (!tokenData) {
-      throw "INVALID";
-    }
-
-    const password = AuthHelper.getPasswordHash(payload.password);
-
-    await CustomersModel.updateOne(
-      { _id: tokenData.user._id },
-      { $set: { password } },
-    );
-    await AuthTokensModel.updateOne(
-      { _id: tokenData._id },
-      { $set: { consumed: true } },
-    );
-
-    EmailNotifications.resetPasswordConfirmation(tokenData.user);
-  } catch (error) {
-    throw error;
-  }
-};
-
 service.me = async (payload) => {
   const user = await CustomersModel.findOne(
     { _id: payload._id },
@@ -125,5 +63,51 @@ service.me = async (payload) => {
     isDeleted: false,
     customer: user._id,
   });
-  return { ...user, bookings };
+
+  // Populate location address
+  let locationData = null;
+  if (user.location) {
+    locationData = await LocationsModel.findOne(
+      { _id: user.location, isDeleted: false },
+      { address: 1 },
+    ).lean();
+  }
+
+  // Populate building name
+  let buildingData = null;
+  if (user.building) {
+    buildingData = await BuildingsModel.findOne(
+      { _id: user.building, isDeleted: false },
+      { name: 1, location_id: 1 },
+    ).lean();
+  }
+
+  return {
+    ...user,
+    bookings,
+    locationData,
+    buildingData,
+  };
+};
+
+service.updateProfile = async (payload, body) => {
+  const allowedFields = [
+    "firstName",
+    "lastName",
+    "email",
+    "building",
+    "location",
+    "flat_no",
+  ];
+  const updateData = {};
+  for (const field of allowedFields) {
+    if (body[field] !== undefined) {
+      updateData[field] = body[field];
+    }
+  }
+  if (Object.keys(updateData).length === 0) {
+    throw "NO_FIELDS";
+  }
+  await CustomersModel.updateOne({ _id: payload._id }, { $set: updateData });
+  return service.me(payload);
 };
