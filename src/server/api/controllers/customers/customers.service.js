@@ -773,6 +773,8 @@ service.importData = async (userInfo, excelData) => {
         if (!iterator.mobile) throw "Mobile number is required";
         if (!iterator.registration_no)
           throw "Vehicle registration number is required";
+        if (!iterator.parking_no)
+          throw "Parking number is required";
 
         // Check if customer exists
         const findUserQuery = {
@@ -820,8 +822,11 @@ service.importData = async (userInfo, excelData) => {
           );
 
           const regNo = iterator.registration_no;
+          const parkingNo = iterator.parking_no || '';
+          
+          // ✅ NEW LOGIC: Check if BOTH vehicle AND parking match
           const hasVehicle = customerInfo.vehicles.find(
-            (v) => v.registration_no === regNo,
+            (v) => v.registration_no === regNo && (v.parking_no || '') === parkingNo,
           );
 
           if (hasVehicle) {
@@ -839,11 +844,54 @@ service.importData = async (userInfo, excelData) => {
         const vehicleInfo = buildPayload.vehicle(iterator, worker);
 
         if (addVehicle) {
+          // ✅ NEW LOGIC: Before adding vehicle, check if vehicle+parking exists elsewhere
+          const vehicleAndParkingExists = await CustomersModel.findOne({
+            _id: { $ne: customerInfo._id }, // Different customer
+            vehicles: {
+              $elemMatch: {
+                registration_no: vehicleInfo.registration_no,
+                parking_no: vehicleInfo.parking_no || '',
+              },
+            },
+          });
+
+          if (vehicleAndParkingExists) {
+            console.log(
+              `⚠️ Vehicle ${vehicleInfo.registration_no} with parking ${vehicleInfo.parking_no || 'N/A'} exists elsewhere, skipping add`,
+            );
+            counts.duplicates.push({
+              row: `${iterator.firstName || ""} ${iterator.lastName || ""} - ${iterator.registration_no}`,
+              reason: "Vehicle+Parking combination already exists with another customer",
+            });
+            continue;
+          }
+
           await CustomersModel.updateOne(
             { _id: customerInfo._id },
             { $push: { vehicles: vehicleInfo } },
           );
         } else {
+          // ✅ NEW LOGIC: Before creating new customer, check if vehicle+parking exists
+          const vehicleAndParkingExists = await CustomersModel.findOne({
+            vehicles: {
+              $elemMatch: {
+                registration_no: vehicleInfo.registration_no,
+                parking_no: vehicleInfo.parking_no || '',
+              },
+            },
+          });
+
+          if (vehicleAndParkingExists) {
+            console.log(
+              `⚠️ Vehicle ${vehicleInfo.registration_no} with parking ${vehicleInfo.parking_no || 'N/A'} exists elsewhere, skipping customer creation`,
+            );
+            counts.duplicates.push({
+              row: `${iterator.firstName || ""} ${iterator.lastName || ""} - ${iterator.registration_no}`,
+              reason: "Vehicle+Parking combination already exists",
+            });
+            continue;
+          }
+
           // CREATE NEW
           const customer = {
             ...buildPayload.customer(iterator, location, building),
@@ -1282,6 +1330,9 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       if (!row.registration_no) {
         throw new Error("Vehicle Registration No is required");
       }
+      if (!row.parking_no) {
+        throw new Error("Parking No is required");
+      }
       if (!row.schedule_type) {
         throw new Error("Schedule Type is required");
       }
@@ -1372,41 +1423,50 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         customer.status = 1;
         customer.isDeleted = false; // ✅ CRITICAL FIX: Undelete customers during import
 
-        // Process each vehicle: check globally and skip if exists
+        // Process each vehicle: check if BOTH vehicle AND parking match together
         for (const newVehicle of customerData.vehicles) {
-          // Check if vehicle exists in THIS customer's vehicles
-          const vehicleExistsInCurrentCustomer = customer.vehicles.some(
+          // ✅ NEW LOGIC: Check if BOTH registration_no AND parking_no match in THIS customer's vehicles
+          const vehicleAndParkingExistInCurrentCustomer = customer.vehicles.some(
             (v) =>
               v.registration_no.toLowerCase() ===
-              newVehicle.registration_no.toLowerCase(),
+                newVehicle.registration_no.toLowerCase() &&
+              (v.parking_no || '').toLowerCase() ===
+                (newVehicle.parking_no || '').toLowerCase(),
           );
 
-          if (vehicleExistsInCurrentCustomer) {
+          if (vehicleAndParkingExistInCurrentCustomer) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists for this mobile, skipped`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || 'N/A'} already exists for this mobile, skipped`,
             );
             continue;
           }
 
-          // Check if vehicle exists with a DIFFERENT customer (globally)
-          const otherCustomerWithVehicle = await CustomersModel.findOne({
+          // ✅ NEW LOGIC: Check if BOTH vehicle AND parking exist with a DIFFERENT customer (globally)
+          const otherCustomerWithVehicleAndParking = await CustomersModel.findOne({
             mobile: { $ne: mobile }, // Different mobile number
-            "vehicles.registration_no": {
-              $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+            vehicles: {
+              $elemMatch: {
+                registration_no: {
+                  $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+                },
+                parking_no: {
+                  $regex: new RegExp(`^${newVehicle.parking_no || ''}$`, "i"),
+                },
+              },
             },
           });
 
-          if (otherCustomerWithVehicle) {
+          if (otherCustomerWithVehicleAndParking) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists with another customer (Mobile: ${otherCustomerWithVehicle.mobile}), skipped (no transfer)`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || 'N/A'} already exists with another customer (Mobile: ${otherCustomerWithVehicleAndParking.mobile}), skipped (no transfer)`,
             );
             // ✅ FIX: Don't transfer, just skip
             continue;
           } else {
-            // Vehicle doesn't exist anywhere, add it
+            // Vehicle+Parking combination doesn't exist anywhere, add it
             customer.vehicles.push(newVehicle);
             console.log(
-              `  ➕ Added new vehicle: ${newVehicle.registration_no}`,
+              `  ➕ Added new vehicle: ${newVehicle.registration_no} (Parking: ${newVehicle.parking_no || 'N/A'})`,
             );
           }
         }
@@ -1422,30 +1482,37 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
           `➕ Checking new customer: ${customerData.firstName} (Mobile: ${mobile}) with ${customerData.vehicles.length} vehicle(s)`,
         );
 
-        // ✅ FIX: Before creating new customer, check if ANY vehicle already exists
+        // ✅ FIX: Before creating new customer, check if vehicle+parking combination exists
         // If all vehicles exist, don't create customer at all
         const vehiclesToAdd = [];
         let hasExistingVehicles = false;
 
         for (const newVehicle of customerData.vehicles) {
-          // Check if vehicle exists with ANY customer
-          const otherCustomerWithVehicle = await CustomersModel.findOne({
-            "vehicles.registration_no": {
-              $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+          // ✅ NEW LOGIC: Check if BOTH vehicle AND parking exist with ANY customer
+          const otherCustomerWithVehicleAndParking = await CustomersModel.findOne({
+            vehicles: {
+              $elemMatch: {
+                registration_no: {
+                  $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+                },
+                parking_no: {
+                  $regex: new RegExp(`^${newVehicle.parking_no || ''}$`, "i"),
+                },
+              },
             },
           });
 
-          if (otherCustomerWithVehicle) {
+          if (otherCustomerWithVehicleAndParking) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} already exists with customer (Mobile: ${otherCustomerWithVehicle.mobile}), skipped (no customer creation)`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || 'N/A'} already exists with customer (Mobile: ${otherCustomerWithVehicleAndParking.mobile}), skipped (no customer creation)`,
             );
             hasExistingVehicles = true;
             // ✅ FIX: Don't transfer, don't add to list
           } else {
-            // Vehicle doesn't exist, can add it
+            // Vehicle+Parking combination doesn't exist, can add it
             vehiclesToAdd.push(newVehicle);
             console.log(
-              `  ✅ Vehicle ${newVehicle.registration_no} is new, will be added`,
+              `  ✅ Vehicle ${newVehicle.registration_no} (Parking: ${newVehicle.parking_no || 'N/A'}) is new, will be added`,
             );
           }
         }

@@ -395,7 +395,7 @@ controller.downloadTemplate = async (req, res) => {
       { header: "Mobile (Optional)", key: "mobile", width: 15 },
       { header: "Email", key: "email", width: 25 },
       { header: "Vehicle Registration No*", key: "registration_no", width: 20 },
-      { header: "Parking No", key: "parking_no", width: 15 },
+      { header: "Parking No*", key: "parking_no", width: 15 },
       { header: "Flat No (Optional)", key: "flat_no", width: 18 },
       {
         header: "Schedule Type* (daily/weekly/onetime)",
