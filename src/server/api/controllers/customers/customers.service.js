@@ -1433,7 +1433,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
               "i",
             ),
           },
-          ...(locationDoc ? { location_id: locationDoc._id.toString() } : {}),
+          ...(locationDoc ? { location_id: locationDoc._id } : {}),
         }).lean();
         if (!buildingDoc) {
           throw new Error(
