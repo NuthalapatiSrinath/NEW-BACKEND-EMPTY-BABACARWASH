@@ -318,3 +318,92 @@ controller.exportPDF = async (req, res) => {
       .json({ message: "Failed to generate PDF", error: error.message });
   }
 };
+
+// ===========================================
+// MANUAL INVOICE GENERATION
+// ===========================================
+
+/**
+ * POST /payments/run-invoice
+ * Body: { month (0-11), year, mode ("full_subscription" | "per_wash") }
+ */
+controller.runInvoice = async (req, res) => {
+  try {
+    const { month, year, mode } = req.body;
+    console.log("🚀 [Run Invoice] Request received");
+    console.log("📅 Month:", month, "Year:", year, "Mode:", mode);
+
+    if (month === undefined || month === null || !year || !mode) {
+      return res.status(400).json({
+        statusCode: 400,
+        message: "Missing required fields: month, year, mode",
+      });
+    }
+
+    const validModes = ["full_subscription", "per_wash"];
+    if (!validModes.includes(mode)) {
+      return res.status(400).json({
+        statusCode: 400,
+        message: `Invalid mode "${mode}". Must be one of: ${validModes.join(", ")}`,
+      });
+    }
+
+    const invoiceCron = require("../../../../scripts/crons/invoice");
+
+    const result = await invoiceCron.run(month, year, mode);
+
+    if (result.blocked) {
+      return res.status(400).json({
+        statusCode: 400,
+        ...result,
+      });
+    }
+
+    return res.status(200).json({
+      statusCode: 200,
+      ...result,
+    });
+  } catch (error) {
+    console.error("❌ [Run Invoice Error]:", error);
+    return res.status(500).json({
+      statusCode: 500,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * GET /payments/check-invoice?month=0&year=2026
+ * Check if invoices already exist for a given month
+ */
+controller.checkInvoice = async (req, res) => {
+  try {
+    const { month, year } = req.query;
+
+    if (month === undefined || month === null || !year) {
+      return res.status(400).json({
+        statusCode: 400,
+        message: "Missing required query params: month, year",
+      });
+    }
+
+    const invoiceCron = require("../../../../scripts/crons/invoice");
+    const result = await invoiceCron.checkExisting(
+      parseInt(month),
+      parseInt(year),
+    );
+
+    return res.status(200).json({
+      statusCode: 200,
+      ...result,
+    });
+  } catch (error) {
+    console.error("❌ [Check Invoice Error]:", error);
+    return res.status(500).json({
+      statusCode: 500,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};

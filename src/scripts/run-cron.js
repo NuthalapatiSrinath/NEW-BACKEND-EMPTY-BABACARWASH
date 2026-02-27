@@ -29,27 +29,32 @@ const run = async () => {
     } else if (type === "attendance") {
       await attendance.run();
     } else if (type === "invoice") {
-      // Pass month/year to invoice cron if provided
+      // Pass month/year/mode to invoice cron if provided
+      // Usage: invoice [month] [year] [mode]
+      // mode: "full_subscription" or "per_wash" (default: "full_subscription")
+      const invoiceMode = process.argv[5] || "full_subscription";
       if (month !== null && year !== null) {
         console.log(
-          `📅 Custom date provided: Month ${month} (0-11), Year ${year}`,
+          `📅 Custom date provided: Billing month ${month} (0-11), Year ${year}`,
         );
-        await invoice.run(month, year);
+        console.log(`💡 Mode: ${invoiceMode}`);
+        await invoice.run(month, year, invoiceMode);
       } else {
-        console.log(`📅 Using current month`);
-        await invoice.run();
+        console.log(`📅 Cron mode: billing for PREVIOUS month`);
+        console.log(`💡 Mode: ${invoiceMode}`);
+        await invoice.run(null, null, invoiceMode);
       }
     } else {
       console.log("⚠️ Unknown task! Use 'jobs', 'attendance', or 'invoice'");
       console.log("📌 Invoice examples:");
       console.log(
-        "   node src/scripts/run-cron.js invoice           (current month)",
+        "   node src/scripts/run-cron.js invoice              (previous month, full_subscription)",
       );
       console.log(
-        "   node src/scripts/run-cron.js invoice 0 2026    (January 2026)",
+        "   node src/scripts/run-cron.js invoice 1 2026       (February 2026 billing)",
       );
       console.log(
-        "   node src/scripts/run-cron.js invoice 11 2025   (December 2025)",
+        "   node src/scripts/run-cron.js invoice 1 2026 per_wash  (February 2026, per-wash)",
       );
     }
 

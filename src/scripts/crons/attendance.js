@@ -15,7 +15,7 @@ cron.run = async () => {
             attendanceData.push({
                 date: new Date(),
                 worker: iterator._id,
-                present: false
+                present: true
             })
         }
 
@@ -23,7 +23,7 @@ cron.run = async () => {
             attendanceData.push({
                 date: new Date(),
                 staff: iterator._id,
-                present: false
+                present: true
             })
         }
 

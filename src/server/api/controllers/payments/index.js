@@ -24,6 +24,10 @@ router.get(
   controller.monthlyStatement,
 );
 
+// Invoice generation (manual run + check)
+router.post("/run-invoice", AuthHelper.authenticate, controller.runInvoice);
+router.get("/check-invoice", AuthHelper.authenticate, controller.checkInvoice);
+
 // Parameterized routes come after specific routes
 router.get("/:id", AuthHelper.authenticate, controller.info);
 router.put("/:id", AuthHelper.authenticate, controller.update);

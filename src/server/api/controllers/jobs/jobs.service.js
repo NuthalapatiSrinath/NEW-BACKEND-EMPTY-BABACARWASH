@@ -468,9 +468,44 @@ service.monthlyStatement = async (userInfo, query) => {
   const year = moment(findQuery.assignedDate.$gte).format("YYYY");
 
   // =========================================================
-  // SCENARIO 1: WORKER SELECTED - SHOW SCHEDULE (Not historical washes)
+  // SCENARIO 1: WORKER SELECTED - SHOW SCHEDULE
+  // ✅ FIX: For past days use historical jobs (schedule at that time),
+  //         for future days use current schedule from customer document.
+  //         This way changing schedule only affects future, not past.
   // =========================================================
   if (query.workerId) {
+    // ✅ Fetch ALL jobs (any status) for this worker in this month
+    // These represent the historical schedule (jobs cron created them based on schedule at that time)
+    const allJobsForMonth = await JobsModel.find({
+      isDeleted: false,
+      worker: query.workerId,
+      assignedDate: {
+        $gte: moment(new Date(query.year, query.month, 1)).startOf("month"),
+        $lte: moment(new Date(query.year, query.month, 1)).endOf("month"),
+      },
+    })
+      .select("vehicle assignedDate registration_no parking_no customer")
+      .lean();
+
+    // Build lookup: vehicleId → Set of scheduled days (from historical jobs)
+    const historicalScheduleMap = {};
+    allJobsForMonth.forEach((job) => {
+      const vid = job.vehicle?.toString();
+      if (!vid) return;
+      if (!historicalScheduleMap[vid]) historicalScheduleMap[vid] = new Set();
+      const day = moment(job.assignedDate).tz("Asia/Dubai").date();
+      historicalScheduleMap[vid].add(day);
+    });
+
+    // Determine today's date boundary for past vs future
+    const today = moment().tz("Asia/Dubai").startOf("day");
+    const monthStart = moment(new Date(query.year, query.month, 1)).startOf(
+      "month",
+    );
+    const monthEnd = moment(new Date(query.year, query.month, 1)).endOf(
+      "month",
+    );
+
     // ✅ Query customers to get current vehicle assignments for this worker
     const customers = await CustomersModel.find({
       isDeleted: false,
@@ -479,12 +514,6 @@ service.monthlyStatement = async (userInfo, query) => {
     }).lean();
 
     const carMap = new Map();
-    const monthStart = moment(new Date(query.year, query.month, 1)).startOf(
-      "month",
-    );
-    const monthEnd = moment(new Date(query.year, query.month, 1)).endOf(
-      "month",
-    );
 
     // Process each customer's vehicles assigned to this worker
     customers.forEach((customer) => {
@@ -505,10 +534,9 @@ service.monthlyStatement = async (userInfo, query) => {
         if (vehicleStart && moment(vehicleStart).isAfter(monthEnd)) return;
         if (vehicleEnd && moment(vehicleEnd).isBefore(monthStart)) return;
 
-        // Convert schedule_days to day names (handle string or array format)
+        // Convert schedule_days to day names (for future days only)
         let scheduleDays = [];
         if (vehicle.schedule_days) {
-          // Comprehensive day name mapping (handles both short and full names)
           const normalizeDayName = (dayStr) => {
             const dayMap = {
               sun: "sunday",
@@ -529,32 +557,29 @@ service.monthlyStatement = async (userInfo, query) => {
             return dayMap[dayStr.toLowerCase()] || "";
           };
 
-          // Handle string format: "Tue,Thu,Sat,Sun"
           if (typeof vehicle.schedule_days === "string") {
             scheduleDays = vehicle.schedule_days
               .split(",")
               .map((d) => normalizeDayName(d.trim()))
               .filter((d) => d);
-          }
-          // Handle array format
-          else if (Array.isArray(vehicle.schedule_days)) {
+          } else if (Array.isArray(vehicle.schedule_days)) {
             scheduleDays = vehicle.schedule_days
               .flatMap((d) => {
-                if (typeof d === "object" && d.day) {
+                if (typeof d === "object" && d.day)
                   return normalizeDayName(d.day);
-                }
-                // If array element is a comma-separated string like "Mon,Wed,Fri"
                 if (typeof d === "string" && d.includes(",")) {
                   return d
                     .split(",")
                     .map((day) => normalizeDayName(day.trim()));
                 }
-                // Single string day name
                 return typeof d === "string" ? normalizeDayName(d) : "";
               })
               .filter((d) => d);
           }
         }
+
+        const vehicleId = vehicle._id.toString();
+        const historicalDays = historicalScheduleMap[vehicleId] || new Set();
 
         // Calculate schedule marks for each day in the month
         const dailyMarks = new Array(daysInMonth).fill(0);
@@ -567,37 +592,43 @@ service.monthlyStatement = async (userInfo, query) => {
           if (vehicleEnd && currentDate.isAfter(moment(vehicleEnd), "day"))
             continue;
 
-          // Check if this day matches the schedule
-          let isScheduled = false;
-          if (vehicle.schedule_type === "daily") {
-            // Exclude Sundays for daily schedules (0 = Sunday)
-            const dayOfWeek = currentDate.day();
-            isScheduled = dayOfWeek !== 0;
-          } else if (
-            vehicle.schedule_type === "weekly" &&
-            scheduleDays.length > 0
-          ) {
-            const dayNames = [
-              "sunday",
-              "monday",
-              "tuesday",
-              "wednesday",
-              "thursday",
-              "friday",
-              "saturday",
-            ];
-            const dayName = dayNames[currentDate.day()];
-            isScheduled = scheduleDays.includes(dayName);
-          }
-
-          if (isScheduled) {
-            dailyMarks[day - 1] = 1; // Mark as scheduled
+          // ✅ KEY LOGIC: Past days use historical jobs, future days use current schedule
+          if (currentDate.isBefore(today)) {
+            // PAST DAY: Check if a job was created for this day (historical schedule)
+            if (historicalDays.has(day)) {
+              dailyMarks[day - 1] = 1;
+            }
+          } else {
+            // TODAY OR FUTURE: Use current schedule from customer document
+            let isScheduled = false;
+            if (vehicle.schedule_type === "daily") {
+              const dayOfWeek = currentDate.day();
+              isScheduled = dayOfWeek !== 0; // Exclude Sundays
+            } else if (
+              vehicle.schedule_type === "weekly" &&
+              scheduleDays.length > 0
+            ) {
+              const dayNames = [
+                "sunday",
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+              ];
+              const dayName = dayNames[currentDate.day()];
+              isScheduled = scheduleDays.includes(dayName);
+            }
+            if (isScheduled) {
+              dailyMarks[day - 1] = 1;
+            }
           }
         }
 
-        const carKey = vehicle._id.toString();
+        const carKey = vehicleId;
 
-        // Calculate dynamic weekly schedule indicator (W1, W2, W3, W4, etc.)
+        // Calculate dynamic weekly schedule indicator
         let cleaningDisplay = "W3"; // default
         if (vehicle.schedule_type === "daily") {
           cleaningDisplay = "D";
