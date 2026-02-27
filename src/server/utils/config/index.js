@@ -1,12 +1,12 @@
 const dotenv = require('dotenv')
-const { parsed } = dotenv.config()
+dotenv.config() // Load .env file if it exists
 
 const config = {
-    env: parsed.ENV,
-    port: Number(parsed.PORT),
+    env: process.env.ENV,
+    port: Number(process.env.PORT),
     database: {
         mongo: {
-            uri: parsed.MONGO_URI,
+            uri: process.env.MONGO_URI,
             debug: false,
             options: {
                 authSource: "admin",
@@ -18,18 +18,18 @@ const config = {
         }
     },
     keys: {
-        secret: parsed.SECRET_KEY
+        secret: process.env.SECRET_KEY
     },
     AWS: {
-        id: parsed.AWS_ACCESS_KEY_ID,
-        key: parsed.AWS_SECRET_KET,
+        id: process.env.AWS_ACCESS_KEY_ID,
+        key: process.env.AWS_SECRET_KET,
         bucket: "bcw"
     },
     smtp: {
-        host: parsed.SMTP_HOST,
-        username: parsed.SMTP_USERNAME,
-        password: parsed.SMTP_PASSWORD,
-        email: parsed.SMTP_USERNAME
+        host: process.env.SMTP_HOST,
+        username: process.env.SMTP_USERNAME,
+        password: process.env.SMTP_PASSWORD,
+        email: process.env.SMTP_USERNAME
     },
 
 }
