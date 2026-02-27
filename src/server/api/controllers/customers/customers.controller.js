@@ -407,14 +407,17 @@ controller.downloadTemplate = async (req, res) => {
       { header: "Advance Amount", key: "advance_amount", width: 15 },
       { header: "Start Date (DD/MM/YYYY)", key: "start_date", width: 20 },
       { header: "Onboard Date (DD/MM/YYYY)", key: "onboard_date", width: 22 },
+      { header: "Location", key: "location", width: 25 },
+      { header: "Building", key: "building", width: 25 },
+      { header: "Worker", key: "worker", width: 25 },
     ];
 
-    // Add sample rows - Multiple vehicles for same customer
+    // EXAMPLE 1: Single customer with MULTIPLE vehicles (same mobile number)
     worksheet.addRow({
-      firstName: "John",
-      lastName: "Doe",
-      mobile: "", // Leave empty for auto-generation
-      email: "john@example.com",
+      firstName: "Ahmed",
+      lastName: "Ali",
+      mobile: "971501234567", // Same mobile = same customer
+      email: "ahmed@example.com",
       registration_no: "ABC123",
       parking_no: "P-101",
       flat_no: "A-304",
@@ -423,15 +426,18 @@ controller.downloadTemplate = async (req, res) => {
       amount: "300",
       advance_amount: "100",
       start_date: "01/02/2026",
-      onboard_date: "01/02/2026", // Date when vehicle was first onboarded
+      onboard_date: "01/02/2026",
+      location: "Business Bay",
+      building: "U-Bora Tower P1",
+      worker: "Enamul Sardar",
     });
 
-    // Same customer, different vehicle
+    // EXAMPLE 1 continued: Second vehicle for SAME customer (same mobile)
     worksheet.addRow({
-      firstName: "John",
-      lastName: "Doe",
-      mobile: "", // Same mobile or leave empty - will link to same customer
-      email: "john@example.com",
+      firstName: "Ahmed",
+      lastName: "Ali",
+      mobile: "971501234567", // ✅ SAME MOBILE = Adds vehicle to above customer
+      email: "ahmed@example.com",
       registration_no: "XYZ789", // Different vehicle
       parking_no: "P-102",
       flat_no: "A-304",
@@ -440,24 +446,70 @@ controller.downloadTemplate = async (req, res) => {
       amount: "250",
       advance_amount: "50",
       start_date: "01/02/2026",
-      onboard_date: "01/02/2026", // Same onboard date for same customer
+      onboard_date: "01/02/2026",
+      location: "Business Bay",
+      building: "U-Bora Tower P1",
+      worker: "Enamul Sardar",
     });
 
-    // Third sample - onetime schedule
+    // EXAMPLE 1 continued: Third vehicle for SAME customer
     worksheet.addRow({
-      firstName: "Jane",
-      lastName: "Smith",
-      mobile: "971501234567", // Or leave empty for auto-generation
-      email: "jane@example.com",
+      firstName: "Ahmed",
+      lastName: "Ali",
+      mobile: "971501234567", // ✅ SAME MOBILE = Adds 3rd vehicle to same customer
+      email: "ahmed@example.com",
+      registration_no: "DEF456",
+      parking_no: "P-103",
+      flat_no: "A-304",
+      schedule_type: "daily",
+      schedule_days: "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday",
+      amount: "350",
+      advance_amount: "0",
+      start_date: "01/02/2026",
+      onboard_date: "01/02/2026",
+      location: "Business Bay",
+      building: "U-Bora Tower P1",
+      worker: "Enamul Sardar",
+    });
+
+    // EXAMPLE 2: Different customer (different mobile or empty)
+    worksheet.addRow({
+      firstName: "Sara",
+      lastName: "Khan",
+      mobile: "971509876543", // ✅ DIFFERENT MOBILE = New customer
+      email: "sara@example.com",
       registration_no: "LMN456",
       parking_no: "P-201",
-      flat_no: "",
+      flat_no: "B-105",
       schedule_type: "onetime",
       schedule_days: "",
       amount: "150",
       advance_amount: "0",
       start_date: "15/02/2026",
-      onboard_date: "15/02/2026", // Can be different if joining later
+      onboard_date: "15/02/2026",
+      location: "Dubai Marina",
+      building: "Marina Heights",
+      worker: "",
+    });
+
+    // EXAMPLE 3: Auto-generated mobile (leave empty)
+    worksheet.addRow({
+      firstName: "John",
+      lastName: "Doe",
+      mobile: "", // ✅ EMPTY = Auto-generates unique mobile (2000000001, 2000000002, etc)
+      email: "john@example.com",
+      registration_no: "GHI789",
+      parking_no: "P-301",
+      flat_no: "C-202",
+      schedule_type: "weekly",
+      schedule_days: "Sunday,Tuesday,Thursday",
+      amount: "200",
+      advance_amount: "50",
+      start_date: "01/02/2026",
+      onboard_date: "01/02/2026",
+      location: "",
+      building: "",
+      worker: "",
     });
 
     res.setHeader(

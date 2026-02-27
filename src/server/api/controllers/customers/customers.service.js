@@ -449,16 +449,12 @@ service.update = async (userInfo, id, payload) => {
     // Update customer fields
     await CustomersModel.updateOne({ _id: id }, { $set: payload });
 
-    // Update each vehicle
-    for (const vehicle of vehiclesToUpdate) {
-      if (vehicle._id) {
-        // Existing vehicle - update it
-        await CustomersModel.updateOne(
-          { _id: id, "vehicles._id": vehicle._id },
-          { $set: { "vehicles.$": vehicle } },
-        );
-      }
-    }
+    // ✅ FIX: Replace entire vehicles array to properly handle additions, updates, AND deletions
+    // This ensures removed vehicles are actually deleted from the database
+    await CustomersModel.updateOne(
+      { _id: id },
+      { $set: { vehicles: vehiclesToUpdate } },
+    );
 
     const customerData = await CustomersModel.findOne({ _id: id }).lean();
     await JobsService.createJob(customerData);
@@ -790,8 +786,7 @@ service.importData = async (userInfo, excelData) => {
         if (!iterator.mobile) throw "Mobile number is required";
         if (!iterator.registration_no)
           throw "Vehicle registration number is required";
-        if (!iterator.parking_no)
-          throw "Parking number is required";
+        if (!iterator.parking_no) throw "Parking number is required";
 
         // Check if customer exists
         const findUserQuery = {
@@ -839,11 +834,12 @@ service.importData = async (userInfo, excelData) => {
           );
 
           const regNo = iterator.registration_no;
-          const parkingNo = iterator.parking_no || '';
-          
+          const parkingNo = iterator.parking_no || "";
+
           // ✅ NEW LOGIC: Check if BOTH vehicle AND parking match
           const hasVehicle = customerInfo.vehicles.find(
-            (v) => v.registration_no === regNo && (v.parking_no || '') === parkingNo,
+            (v) =>
+              v.registration_no === regNo && (v.parking_no || "") === parkingNo,
           );
 
           if (hasVehicle) {
@@ -867,18 +863,19 @@ service.importData = async (userInfo, excelData) => {
             vehicles: {
               $elemMatch: {
                 registration_no: vehicleInfo.registration_no,
-                parking_no: vehicleInfo.parking_no || '',
+                parking_no: vehicleInfo.parking_no || "",
               },
             },
           });
 
           if (vehicleAndParkingExists) {
             console.log(
-              `⚠️ Vehicle ${vehicleInfo.registration_no} with parking ${vehicleInfo.parking_no || 'N/A'} exists elsewhere, skipping add`,
+              `⚠️ Vehicle ${vehicleInfo.registration_no} with parking ${vehicleInfo.parking_no || "N/A"} exists elsewhere, skipping add`,
             );
             counts.duplicates.push({
               row: `${iterator.firstName || ""} ${iterator.lastName || ""} - ${iterator.registration_no}`,
-              reason: "Vehicle+Parking combination already exists with another customer",
+              reason:
+                "Vehicle+Parking combination already exists with another customer",
             });
             continue;
           }
@@ -893,14 +890,14 @@ service.importData = async (userInfo, excelData) => {
             vehicles: {
               $elemMatch: {
                 registration_no: vehicleInfo.registration_no,
-                parking_no: vehicleInfo.parking_no || '',
+                parking_no: vehicleInfo.parking_no || "",
               },
             },
           });
 
           if (vehicleAndParkingExists) {
             console.log(
-              `⚠️ Vehicle ${vehicleInfo.registration_no} with parking ${vehicleInfo.parking_no || 'N/A'} exists elsewhere, skipping customer creation`,
+              `⚠️ Vehicle ${vehicleInfo.registration_no} with parking ${vehicleInfo.parking_no || "N/A"} exists elsewhere, skipping customer creation`,
             );
             counts.duplicates.push({
               row: `${iterator.firstName || ""} ${iterator.lastName || ""} - ${iterator.registration_no}`,
@@ -1210,33 +1207,54 @@ const getCellText = (cell) => {
 const parseExcelDate = (value) => {
   if (!value) return undefined;
 
-  // Handle Excel serial number
+  // Handle Date objects (from ExcelJS auto-parse)
+  if (value instanceof Date) {
+    if (isNaN(value.getTime())) return undefined;
+    // Normalize to midnight UTC to prevent timezone shifts
+    return new Date(
+      Date.UTC(value.getFullYear(), value.getMonth(), value.getDate()),
+    );
+  }
+
+  // Handle Excel serial number (e.g., 46024)
   if (typeof value === "number") {
-    return new Date(Math.round((value - 25569) * 86400 * 1000));
+    const utcMs = Math.round((value - 25569) * 86400 * 1000);
+    const d = new Date(utcMs);
+    // Normalize to midnight UTC
+    return new Date(
+      Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+    );
   }
 
   if (typeof value === "string") {
     const raw = value.trim();
 
-    // Try DD/MM/YYYY format (e.g., 01/02/2026)
+    // Try DD/MM/YYYY format (as per our template)
     if (raw.includes("/")) {
       const parts = raw.split("/");
       if (parts.length === 3) {
         const day = parseInt(parts[0]);
         const month = parseInt(parts[1]);
         const year = parseInt(parts[2]);
-        return new Date(year, month - 1, day);
+        if (!isNaN(day) && !isNaN(month) && !isNaN(year)) {
+          return new Date(Date.UTC(year, month - 1, day));
+        }
       }
     }
 
     // Try YYYY-MM-DD format
     if (raw.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      return new Date(raw);
+      const [y, m, d] = raw.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, d));
     }
   }
 
+  // Fallback: try to parse and normalize to UTC
   const date = new Date(value);
-  return isNaN(date.getTime()) ? undefined : date;
+  if (isNaN(date.getTime())) return undefined;
+  return new Date(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()),
+  );
 };
 
 // Generate auto mobile number (2000000xxx format)
@@ -1293,9 +1311,12 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
     const advance_amount = getCellText(row.getCell(11));
     const start_date = row.getCell(12).value;
     const onboard_date = row.getCell(13).value; // Read onboard_date from column 13
+    const location = getCellText(row.getCell(14)); // Location name
+    const building = getCellText(row.getCell(15)); // Building name
+    const worker = getCellText(row.getCell(16)); // Worker name
 
     console.log(
-      `🔍 Reading Row ${rowNumber}: ${firstName} ${lastName}, Mobile="${mobile}", Vehicle="${registration_no}"`,
+      `🔍 Reading Row ${rowNumber}: ${firstName} ${lastName}, Mobile="${mobile}", Vehicle="${registration_no}", Location="${location}", Building="${building}", Worker="${worker}"`,
     );
 
     // Skip completely empty rows
@@ -1318,13 +1339,23 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       advance_amount,
       start_date,
       onboard_date, // Include onboard_date
+      location, // Location name from Excel
+      building, // Building name from Excel
+      worker, // Worker name from Excel
       rowNumber,
     });
   });
 
   console.log(`✅ [IMPORT INFO] Extracted ${excelData.length} valid rows.`);
 
-  const results = { success: 0, errors: [], created: 0, updated: 0 };
+  const results = {
+    success: 0,
+    errors: [],
+    created: 0,
+    updated: 0,
+    changes: [],
+    createdRecords: [],
+  };
   const customerGroups = new Map(); // Group vehicles by customer identifier
 
   // Get the starting auto-mobile number once at the beginning
@@ -1340,7 +1371,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
     autoMobileCounter = lastNumber + 1;
   }
 
-  // Step 1: Group rows by customer (by mobile or firstName+lastName)
+  // Step 1: Group rows by customer (by mobile only)
   for (const row of excelData) {
     try {
       // Validate required fields
@@ -1358,14 +1389,80 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
       }
 
       // Auto-generate mobile if not provided
+      // Each row without mobile becomes a separate customer
       let mobile = row.mobile;
       if (!mobile || mobile.trim() === "") {
-        // Each vehicle without mobile gets a unique auto-generated mobile using local counter
         mobile = `2000000${String(autoMobileCounter).padStart(3, "0")}`;
-        autoMobileCounter++; // Increment for next vehicle
+        autoMobileCounter++;
         console.log(
           `📱 Auto-generated mobile: ${mobile} for ${row.firstName || "Customer"} - Vehicle ${row.registration_no}`,
         );
+      }
+
+      // ✅ Validate Location → Building → Worker chain (case-insensitive)
+      let locationDoc = null;
+      let buildingDoc = null;
+      let workerDoc = null;
+
+      if (row.location) {
+        locationDoc = await LocationsModel.findOne({
+          isDeleted: false,
+          address: {
+            $regex: new RegExp(
+              `^${row.location.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i",
+            ),
+          },
+        }).lean();
+        if (!locationDoc) {
+          throw new Error(`Location "${row.location}" not found in the system`);
+        }
+      }
+
+      if (row.building) {
+        if (!row.location) {
+          throw new Error(
+            `Building "${row.building}" specified but Location is missing. Please provide Location first.`,
+          );
+        }
+        buildingDoc = await BuildingsModel.findOne({
+          isDeleted: false,
+          name: {
+            $regex: new RegExp(
+              `^${row.building.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i",
+            ),
+          },
+          ...(locationDoc ? { location_id: locationDoc._id.toString() } : {}),
+        }).lean();
+        if (!buildingDoc) {
+          throw new Error(
+            `Building "${row.building}" not found under location "${row.location}"`,
+          );
+        }
+      }
+
+      if (row.worker) {
+        if (!row.building) {
+          throw new Error(
+            `Worker "${row.worker}" specified but Building is missing. Please provide Building first.`,
+          );
+        }
+        workerDoc = await WorkersModel.findOne({
+          isDeleted: false,
+          name: {
+            $regex: new RegExp(
+              `^${row.worker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i",
+            ),
+          },
+          ...(buildingDoc ? { buildings: buildingDoc._id } : {}),
+        }).lean();
+        if (!workerDoc) {
+          throw new Error(
+            `Worker "${row.worker}" not found under building "${row.building}"`,
+          );
+        }
       }
 
       // Use mobile as the primary grouping key
@@ -1376,8 +1473,15 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
           lastName: row.lastName || "",
           email: row.email,
           flat_no: row.flat_no || "",
+          location: locationDoc ? locationDoc._id : null,
+          building: buildingDoc ? buildingDoc._id : null,
           vehicles: [],
         });
+      } else {
+        // Update location/building if provided on a subsequent row for same customer
+        const group = customerGroups.get(mobile);
+        if (locationDoc && !group.location) group.location = locationDoc._id;
+        if (buildingDoc && !group.building) group.building = buildingDoc._id;
       }
 
       // Add vehicle to this customer
@@ -1391,6 +1495,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         advance_amount: parseFloat(row.advance_amount) || 0,
         start_date: startDate,
         onboard_date: parseExcelDate(row.onboard_date) || startDate, // Use start_date as fallback
+        worker: workerDoc ? workerDoc._id : null,
         status: 1,
         rowNumber: row.rowNumber,
       });
@@ -1410,13 +1515,39 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
   // Step 2: Process each customer group
   for (const [mobile, customerData] of customerGroups.entries()) {
     try {
-      // Check if customer exists by mobile
-      let customer = await CustomersModel.findOne({ mobile: mobile });
+      // Check if customer exists by mobile (exclude soft-deleted)
+      let customer = await CustomersModel.findOne({
+        mobile: mobile,
+        isDeleted: { $ne: true },
+      });
 
       if (customer) {
         console.log(
           `🔄 Updating existing customer: ${customerData.firstName || "Customer"} (Mobile: ${mobile})`,
         );
+
+        // ✅ Snapshot BEFORE values for change tracking
+        const beforeSnapshot = {
+          firstName: customer.firstName || "",
+          lastName: customer.lastName || "",
+          email: customer.email || "",
+          flat_no: customer.flat_no || "",
+          location: customer.location ? customer.location.toString() : null,
+          building: customer.building ? customer.building.toString() : null,
+          status: customer.status,
+          vehicleCount: customer.vehicles ? customer.vehicles.length : 0,
+          vehicles: customer.vehicles
+            ? customer.vehicles.map((v) => ({
+                registration_no: v.registration_no || "",
+                parking_no: v.parking_no || "",
+                amount: v.amount || 0,
+                advance_amount: v.advance_amount || 0,
+                schedule_type: v.schedule_type || "",
+                worker: v.worker ? v.worker.toString() : null,
+                status: v.status,
+              }))
+            : [],
+        };
 
         // Update customer basic info (keep existing building/location) - only if firstName provided
         if (customerData.firstName) {
@@ -1431,51 +1562,59 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         if (customerData.flat_no) {
           customer.flat_no = customerData.flat_no;
         }
+        // Update location/building if provided in Excel
+        if (customerData.location) {
+          customer.location = customerData.location;
+        }
+        if (customerData.building) {
+          customer.building = customerData.building;
+        }
 
-        // ✅ FIX: Ensure customer status is active during import
-        // This prevents imported customers from being hidden if they were previously deactivated
+        // Ensure customer status is active during import
         console.log(
           `  📝 Setting status from ${customer.status} to 1 for mobile: ${mobile}`,
         );
         customer.status = 1;
-        customer.isDeleted = false; // ✅ CRITICAL FIX: Undelete customers during import
 
         // Process each vehicle: check if BOTH vehicle AND parking match together
         for (const newVehicle of customerData.vehicles) {
           // ✅ NEW LOGIC: Check if BOTH registration_no AND parking_no match in THIS customer's vehicles
-          const vehicleAndParkingExistInCurrentCustomer = customer.vehicles.some(
-            (v) =>
-              v.registration_no.toLowerCase() ===
-                newVehicle.registration_no.toLowerCase() &&
-              (v.parking_no || '').toLowerCase() ===
-                (newVehicle.parking_no || '').toLowerCase(),
-          );
+          const vehicleAndParkingExistInCurrentCustomer =
+            customer.vehicles.some(
+              (v) =>
+                v.registration_no.toLowerCase() ===
+                  newVehicle.registration_no.toLowerCase() &&
+                (v.parking_no || "").toLowerCase() ===
+                  (newVehicle.parking_no || "").toLowerCase(),
+            );
 
           if (vehicleAndParkingExistInCurrentCustomer) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || 'N/A'} already exists for this mobile, skipped`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || "N/A"} already exists for this mobile, skipped`,
             );
             continue;
           }
 
-          // ✅ NEW LOGIC: Check if BOTH vehicle AND parking exist with a DIFFERENT customer (globally)
-          const otherCustomerWithVehicleAndParking = await CustomersModel.findOne({
-            mobile: { $ne: mobile }, // Different mobile number
-            vehicles: {
-              $elemMatch: {
-                registration_no: {
-                  $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
-                },
-                parking_no: {
-                  $regex: new RegExp(`^${newVehicle.parking_no || ''}$`, "i"),
+          // Check if BOTH vehicle AND parking exist with a DIFFERENT active customer (globally)
+          const otherCustomerWithVehicleAndParking =
+            await CustomersModel.findOne({
+              mobile: { $ne: mobile },
+              isDeleted: { $ne: true },
+              vehicles: {
+                $elemMatch: {
+                  registration_no: {
+                    $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+                  },
+                  parking_no: {
+                    $regex: new RegExp(`^${newVehicle.parking_no || ""}$`, "i"),
+                  },
                 },
               },
-            },
-          });
+            });
 
           if (otherCustomerWithVehicleAndParking) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || 'N/A'} already exists with another customer (Mobile: ${otherCustomerWithVehicleAndParking.mobile}), skipped (no transfer)`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || "N/A"} already exists with another customer (Mobile: ${otherCustomerWithVehicleAndParking.mobile}), skipped (no transfer)`,
             );
             // ✅ FIX: Don't transfer, just skip
             continue;
@@ -1483,7 +1622,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
             // Vehicle+Parking combination doesn't exist anywhere, add it
             customer.vehicles.push(newVehicle);
             console.log(
-              `  ➕ Added new vehicle: ${newVehicle.registration_no} (Parking: ${newVehicle.parking_no || 'N/A'})`,
+              `  ➕ Added new vehicle: ${newVehicle.registration_no} (Parking: ${newVehicle.parking_no || "N/A"})`,
             );
           }
         }
@@ -1493,6 +1632,119 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         console.log(
           `  ✅ Customer saved. Final status: ${customer.status}, ID: ${customer._id}`,
         );
+
+        // ✅ Build AFTER snapshot and detect changes
+        const afterSnapshot = {
+          firstName: customer.firstName || "",
+          lastName: customer.lastName || "",
+          email: customer.email || "",
+          flat_no: customer.flat_no || "",
+          location: customer.location ? customer.location.toString() : null,
+          building: customer.building ? customer.building.toString() : null,
+          status: customer.status,
+          vehicleCount: customer.vehicles ? customer.vehicles.length : 0,
+          vehicles: customer.vehicles
+            ? customer.vehicles.map((v) => ({
+                registration_no: v.registration_no || "",
+                parking_no: v.parking_no || "",
+                amount: v.amount || 0,
+                advance_amount: v.advance_amount || 0,
+                schedule_type: v.schedule_type || "",
+                worker: v.worker ? v.worker.toString() : null,
+                status: v.status,
+              }))
+            : [],
+        };
+
+        // Compare and collect field-level changes
+        const fieldChanges = [];
+        const fieldsToCheck = [
+          "firstName",
+          "lastName",
+          "email",
+          "flat_no",
+          "status",
+        ];
+        for (const field of fieldsToCheck) {
+          if (
+            String(beforeSnapshot[field] || "") !==
+            String(afterSnapshot[field] || "")
+          ) {
+            fieldChanges.push({
+              field,
+              before: beforeSnapshot[field],
+              after: afterSnapshot[field],
+            });
+          }
+        }
+
+        // Check location/building changes (resolve names for readability)
+        if (beforeSnapshot.location !== afterSnapshot.location) {
+          let beforeName = null,
+            afterName = null;
+          if (beforeSnapshot.location) {
+            const loc = await LocationsModel.findById(
+              beforeSnapshot.location,
+            ).lean();
+            beforeName = loc ? loc.address : beforeSnapshot.location;
+          }
+          if (afterSnapshot.location) {
+            const loc = await LocationsModel.findById(
+              afterSnapshot.location,
+            ).lean();
+            afterName = loc ? loc.address : afterSnapshot.location;
+          }
+          fieldChanges.push({
+            field: "location",
+            before: beforeName,
+            after: afterName,
+          });
+        }
+        if (beforeSnapshot.building !== afterSnapshot.building) {
+          let beforeName = null,
+            afterName = null;
+          if (beforeSnapshot.building) {
+            const bld = await BuildingsModel.findById(
+              beforeSnapshot.building,
+            ).lean();
+            beforeName = bld ? bld.name : beforeSnapshot.building;
+          }
+          if (afterSnapshot.building) {
+            const bld = await BuildingsModel.findById(
+              afterSnapshot.building,
+            ).lean();
+            afterName = bld ? bld.name : afterSnapshot.building;
+          }
+          fieldChanges.push({
+            field: "building",
+            before: beforeName,
+            after: afterName,
+          });
+        }
+
+        // Check for new vehicles added
+        if (afterSnapshot.vehicleCount > beforeSnapshot.vehicleCount) {
+          const newCount =
+            afterSnapshot.vehicleCount - beforeSnapshot.vehicleCount;
+          fieldChanges.push({
+            field: "vehicles_added",
+            before: `${beforeSnapshot.vehicleCount} vehicle(s)`,
+            after: `${afterSnapshot.vehicleCount} vehicle(s) (+${newCount} new)`,
+          });
+        }
+
+        // Only record if there were actual changes
+        if (fieldChanges.length > 0) {
+          results.changes.push({
+            customerId: customer._id,
+            customerName:
+              `${customer.firstName || ""} ${customer.lastName || ""}`.trim(),
+            mobile: customer.mobile,
+            action: "updated",
+            fields: fieldChanges,
+          });
+        }
+
         results.updated++; // Count customers updated
       } else {
         console.log(
@@ -1505,23 +1757,25 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
         let hasExistingVehicles = false;
 
         for (const newVehicle of customerData.vehicles) {
-          // ✅ NEW LOGIC: Check if BOTH vehicle AND parking exist with ANY customer
-          const otherCustomerWithVehicleAndParking = await CustomersModel.findOne({
-            vehicles: {
-              $elemMatch: {
-                registration_no: {
-                  $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
-                },
-                parking_no: {
-                  $regex: new RegExp(`^${newVehicle.parking_no || ''}$`, "i"),
+          // Check if BOTH vehicle AND parking exist with ANY active customer
+          const otherCustomerWithVehicleAndParking =
+            await CustomersModel.findOne({
+              isDeleted: { $ne: true },
+              vehicles: {
+                $elemMatch: {
+                  registration_no: {
+                    $regex: new RegExp(`^${newVehicle.registration_no}$`, "i"),
+                  },
+                  parking_no: {
+                    $regex: new RegExp(`^${newVehicle.parking_no || ""}$`, "i"),
+                  },
                 },
               },
-            },
-          });
+            });
 
           if (otherCustomerWithVehicleAndParking) {
             console.log(
-              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || 'N/A'} already exists with customer (Mobile: ${otherCustomerWithVehicleAndParking.mobile}), skipped (no customer creation)`,
+              `  ⚠️ Vehicle ${newVehicle.registration_no} with parking ${newVehicle.parking_no || "N/A"} already exists with customer (Mobile: ${otherCustomerWithVehicleAndParking.mobile}), skipped (no customer creation)`,
             );
             hasExistingVehicles = true;
             // ✅ FIX: Don't transfer, don't add to list
@@ -1529,7 +1783,7 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
             // Vehicle+Parking combination doesn't exist, can add it
             vehiclesToAdd.push(newVehicle);
             console.log(
-              `  ✅ Vehicle ${newVehicle.registration_no} (Parking: ${newVehicle.parking_no || 'N/A'}) is new, will be added`,
+              `  ✅ Vehicle ${newVehicle.registration_no} (Parking: ${newVehicle.parking_no || "N/A"}) is new, will be added`,
             );
           }
         }
@@ -1544,16 +1798,49 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
             mobile: mobile,
             email: customerData.email || "",
             flat_no: customerData.flat_no || "",
-            building: null,
-            location: null,
+            building: customerData.building || null,
+            location: customerData.location || null,
             vehicles: vehiclesToAdd,
             status: 1,
             isDeleted: false,
             createdBy: userInfo._id,
           };
 
-          await new CustomersModel(newCustomer).save();
+          const savedCustomer = await new CustomersModel(newCustomer).save();
           results.created++;
+
+          // Track created record details
+          let locationName = null,
+            buildingName = null;
+          if (customerData.location) {
+            const loc = await LocationsModel.findById(
+              customerData.location,
+            ).lean();
+            locationName = loc ? loc.address : null;
+          }
+          if (customerData.building) {
+            const bld = await BuildingsModel.findById(
+              customerData.building,
+            ).lean();
+            buildingName = bld ? bld.name : null;
+          }
+          results.createdRecords.push({
+            customerId: savedCustomer._id,
+            customerName:
+              `${customerData.firstName || ""} ${customerData.lastName || ""}`.trim(),
+            mobile: mobile,
+            email: customerData.email || "",
+            flat_no: customerData.flat_no || "",
+            location: locationName,
+            building: buildingName,
+            vehicleCount: vehiclesToAdd.length,
+            vehicles: vehiclesToAdd.map((v) => ({
+              registration_no: v.registration_no,
+              parking_no: v.parking_no,
+              amount: v.amount,
+              schedule_type: v.schedule_type,
+            })),
+          });
           console.log(
             `  ✅ Created new customer with ${vehiclesToAdd.length} vehicle(s)`,
           );
@@ -1579,5 +1866,19 @@ service.importDataFromExcel = async (userInfo, fileBuffer) => {
   }
 
   console.log("🏁 [CUSTOMER IMPORT COMPLETE]", results);
-  return results;
+
+  // Save import log with full history tracked
+  const importLog = await new ImportLogsModel({
+    type: "customers-import-excel",
+    logs: {
+      success: results.success,
+      errors: results.errors,
+      created: results.created,
+      updated: results.updated,
+      changes: results.changes,
+      createdRecords: results.createdRecords,
+    },
+  }).save();
+
+  return { _id: importLog._id, ...results };
 };
