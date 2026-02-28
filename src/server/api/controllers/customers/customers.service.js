@@ -35,7 +35,7 @@ service.list = async (userInfo, query) => {
   );
 
   // Add Building Filter
-  if (query.building) {
+  if (query.building && query.building.trim() !== "") {
     findQuery.building = query.building;
     console.log("🏢 [CUSTOMER LIST] Filtering by building:", query.building);
   }
@@ -161,14 +161,28 @@ service.list = async (userInfo, query) => {
     .sort({ _id: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
-    .populate({
-      path: "building",
-      match: { isDeleted: false },
-      populate: {
-        path: "location_id",
-      },
-    })
     .lean();
+
+  // ✅ Fix any invalid building values before populate
+  // Handles "", " ", or any non-ObjectId string to prevent CastError
+  data.forEach((customer) => {
+    if (
+      customer.building !== null &&
+      customer.building !== undefined &&
+      !mongoose.Types.ObjectId.isValid(customer.building)
+    ) {
+      customer.building = null;
+    }
+  });
+
+  // Now populate safely
+  data = await CustomersModel.populate(data, {
+    path: "building",
+    match: { isDeleted: false },
+    populate: {
+      path: "location_id",
+    },
+  });
 
   console.log("\n🔍 [DEBUG] First 3 customers returned from query:");
   data.slice(0, 3).forEach((customer, idx) => {

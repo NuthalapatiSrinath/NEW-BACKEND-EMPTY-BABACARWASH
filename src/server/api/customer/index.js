@@ -11,5 +11,6 @@ router.use("/buildings", require("./buildings"));
 router.use("/payments", require("./payments"));
 router.use("/history", require("./history"));
 router.use("/vehicle-catalog", require("./vehicle-catalog"));
+router.use("/activity", require("./activity"));
 
 module.exports = router;

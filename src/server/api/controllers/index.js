@@ -24,5 +24,8 @@ router.use("/admin/staff", require("./staff"));
 // ✅ FIXED: Added require()
 router.use("/salary", require("./salary"));
 router.use("/vehicle-catalog", require("./vehicle-catalog"));
+router.use("/customer-activities", require("./customer-activities"));
+router.use("/staff-activities", require("./staff-activities"));
+router.use("/admin-activities", require("./admin-activities"));
 
 module.exports = router;
