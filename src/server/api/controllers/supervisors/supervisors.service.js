@@ -16,6 +16,7 @@ service.list = async (userInfo, query) => {
   const findQuery = { isDeleted: false, role: "supervisor" };
   const total = await UsersModel.countDocuments(findQuery);
   const data = await UsersModel.find(findQuery)
+    .select("+password")
     .sort({ _id: -1 })
     .skip(paginationData.skip)
     .limit(paginationData.limit)
@@ -35,7 +36,9 @@ service.list = async (userInfo, query) => {
 };
 
 service.info = async (userInfo, id) => {
-  return UsersModel.findOne({ _id: id, isDeleted: false }).lean();
+  return UsersModel.findOne({ _id: id, isDeleted: false })
+    .select("+password")
+    .lean();
 };
 
 service.create = async (userInfo, payload) => {

@@ -44,6 +44,7 @@ service.signin = async (payload) => {
 
     const isExists = await UsersModel.countDocuments({
       number: payload.number,
+      isDeleted: { $ne: true },
     });
 
     if (isExists == 0) {
@@ -51,19 +52,11 @@ service.signin = async (payload) => {
       throw "UNAUTHORIZED";
     }
 
-    const userData = await UsersModel.findOne(
-      { number: payload.number },
-      {
-        _id: 1,
-        name: 1,
-        email: 1,
-        hPassword: 1,
-        role: 1,
-        service_type: 1,
-        buildings: 1,
-        mall: 1,
-      },
-    )
+    const userData = await UsersModel.findOne({
+      number: payload.number,
+      isDeleted: { $ne: true },
+    })
+      .select("+hPassword +password")
       .populate("buildings mall")
       .lean();
 
@@ -74,7 +67,36 @@ service.signin = async (payload) => {
       userData.role,
       "| Has hPassword:",
       !!userData.hPassword,
+      "| Has password:",
+      !!userData.password,
     );
+
+    if (!userData.hPassword) {
+      console.log(
+        "❌ [ADMIN AUTH] No hPassword stored for:",
+        userData.name,
+        "- rehashing from plain password",
+      );
+      // If hPassword is missing but plain password exists, fix it
+      if (userData.password) {
+        const newHash = AuthHelper.getPasswordHash(userData.password);
+        await UsersModel.updateOne(
+          { _id: userData._id },
+          { $set: { hPassword: newHash } },
+        );
+        userData.hPassword = newHash;
+        console.log(
+          "✅ [ADMIN AUTH] Regenerated hPassword for:",
+          userData.name,
+        );
+      } else {
+        console.log(
+          "❌ [ADMIN AUTH] No password data at all for:",
+          userData.name,
+        );
+        throw "UNAUTHORIZED";
+      }
+    }
 
     if (!AuthHelper.verifyPasswordHash(payload.password, userData.hPassword)) {
       console.log(
