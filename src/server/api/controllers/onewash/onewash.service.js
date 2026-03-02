@@ -144,15 +144,15 @@ service.list = async (userInfo, query) => {
         (pricing && pricing.sedan && pricing.sedan.wash_types);
       if (hasWashTypes) {
         // Mall has wash types configured - show actual wash type
-        const wt = (item.wash_type || '').toLowerCase();
-        if (wt === 'outside') {
-          item.display_service_type = 'Outside';
-        } else if (wt === 'total') {
-          item.display_service_type = 'Inside + Outside';
-        } else if (wt === 'inside') {
-          item.display_service_type = 'Inside';
+        const wt = (item.wash_type || "").toLowerCase();
+        if (wt === "outside") {
+          item.display_service_type = "Outside";
+        } else if (wt === "total") {
+          item.display_service_type = "Inside + Outside";
+        } else if (wt === "inside") {
+          item.display_service_type = "Inside";
         } else {
-          item.display_service_type = 'Mall';
+          item.display_service_type = "Mall";
         }
       } else {
         // Mall not configured - show "Mall"

@@ -118,15 +118,15 @@ service.list = async (userInfo, query) => {
             (pricing && pricing.sedan && pricing.sedan.wash_types);
           if (hasWashTypes) {
             // Mall has wash types configured, show the wash type and set wash_type field
-            const wt = (job.wash_type || '').toLowerCase();
-            if (wt === 'outside') {
-              display_service_type = 'Outside';
-            } else if (wt === 'total') {
-              display_service_type = 'Inside + Outside';
-            } else if (wt === 'inside') {
-              display_service_type = 'Inside';
+            const wt = (job.wash_type || "").toLowerCase();
+            if (wt === "outside") {
+              display_service_type = "Outside";
+            } else if (wt === "total") {
+              display_service_type = "Inside + Outside";
+            } else if (wt === "inside") {
+              display_service_type = "Inside";
             } else {
-              display_service_type = 'Mall';
+              display_service_type = "Mall";
             }
             wash_type = job.wash_type || null; // Only set wash_type if pricing configured
           } else {

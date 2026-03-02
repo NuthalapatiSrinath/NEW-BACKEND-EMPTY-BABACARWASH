@@ -3,6 +3,8 @@ const moment = require("moment");
 const UsersModel = require("../../models/users.model");
 const WorkersModel = require("../../models/workers.model");
 const OneWashModel = require("../../models/onewash.model");
+const JobsModel = require("../../models/jobs.model");
+const CustomersModel = require("../../models/customers.model");
 const CounterService = require("../../../utils/counters");
 const CommonHelper = require("../../../helpers/common.helper");
 const AuthHelper = require("../auth/auth.helper");
@@ -166,7 +168,150 @@ service.teamList = async (userInfo, query) => {
     .skip(paginationData.skip)
     .limit(paginationData.limit)
     .lean();
-  return { total, data };
+
+  // Compute stats across ALL matching workers (not just current page)
+  const allWorkers = await WorkersModel.find(findQuery)
+    .select("status service_type")
+    .lean();
+  const stats = {
+    total,
+    active: allWorkers.filter((w) => w.status === 1).length,
+    inactive: allWorkers.filter((w) => w.status !== 1).length,
+    residence: allWorkers.filter((w) => w.service_type === "residence").length,
+    mall: allWorkers.filter((w) => w.service_type === "mall").length,
+  };
+
+  return { total, data, stats };
+};
+
+// Worker history (washes) for supervisor's team member
+service.teamHistory = async (userInfo, query, workerId) => {
+  // Verify the worker belongs to this supervisor's team
+  const workerQuery = {
+    _id: workerId,
+    isDeleted: false,
+    ...(userInfo.service_type === "mall"
+      ? { malls: { $in: [userInfo.mall] } }
+      : null),
+    ...(userInfo.service_type === "residence"
+      ? { buildings: { $in: (userInfo.buildings || []).filter((b) => b) } }
+      : null),
+  };
+  const worker = await WorkersModel.findOne(workerQuery).lean();
+  if (!worker) throw "Worker not found or not in your team";
+
+  const paginationData = CommonHelper.paginationData(query);
+  const findQuery = { isDeleted: false, worker: workerId };
+
+  if (query.startDate && query.endDate) {
+    findQuery.createdAt = {
+      $gte: new Date(query.startDate),
+      $lte: new Date(query.endDate),
+    };
+  }
+
+  if (query.customer && query.customer.trim())
+    findQuery.customer = query.customer;
+  if (query.building && query.building.trim())
+    findQuery.building = query.building;
+  if (query.mall && query.mall.trim()) findQuery.mall = query.mall;
+
+  if (query.search) {
+    const customers = await CustomersModel.find({
+      isDeleted: false,
+      $or: [
+        { "vehicles.registration_no": { $regex: query.search, $options: "i" } },
+        { "vehicles.parking_no": { $regex: query.search, $options: "i" } },
+      ],
+    })
+      .select("_id vehicles")
+      .lean();
+
+    if (customers.length) {
+      let vehicleIds = [];
+      for (const customer of customers) {
+        if (customer.vehicles) {
+          for (const vehicle of customer.vehicles) {
+            vehicleIds.push(vehicle._id);
+          }
+        }
+      }
+      if (vehicleIds.length > 0) {
+        findQuery.$or = [{ vehicle: { $in: vehicleIds } }];
+      } else {
+        return { total: 0, data: [] };
+      }
+    } else {
+      return { total: 0, data: [] };
+    }
+  }
+
+  let total = 0;
+  let data = [];
+
+  // Residence jobs
+  if (query.service_type && query.service_type === "residence") {
+    total = await JobsModel.countDocuments(findQuery);
+    data = await JobsModel.find(findQuery)
+      .sort({ completedDate: -1 })
+      .skip(paginationData.skip)
+      .limit(paginationData.limit)
+      .populate([
+        { path: "building", model: "buildings" },
+        { path: "location", model: "locations" },
+        { path: "mall", model: "malls" },
+        {
+          path: "customer",
+          model: "customers",
+          select: "firstName lastName mobile vehicles",
+          populate: [
+            { path: "building", model: "buildings" },
+            { path: "location", model: "locations" },
+          ],
+        },
+      ])
+      .lean();
+    data.forEach((item) => {
+      if (item.customer && item.customer.vehicles) {
+        item.vehicle = item.customer.vehicles.find(
+          (e) => e._id.toString() === (item.vehicle || "").toString(),
+        );
+      }
+    });
+  }
+
+  // Onewash (mall) jobs
+  let onewashData = [];
+  let onewashTotal = 0;
+
+  if (query.service_type !== "residence") {
+    onewashTotal = await OneWashModel.countDocuments(findQuery);
+    onewashData = await OneWashModel.find(findQuery)
+      .sort({ completedDate: -1 })
+      .skip(paginationData.skip)
+      .limit(paginationData.limit)
+      .populate([
+        { path: "building", model: "buildings" },
+        { path: "location", model: "locations" },
+        { path: "mall", model: "malls" },
+        {
+          path: "customer",
+          model: "customers",
+          select: "firstName lastName mobile",
+          populate: [
+            { path: "building", model: "buildings" },
+            { path: "location", model: "locations" },
+          ],
+        },
+      ])
+      .lean();
+    onewashData = onewashData.map((e) => ({
+      ...e,
+      vehicle: { registration_no: e.registration_no, parking_no: e.parking_no },
+    }));
+  }
+
+  return { total: total + onewashTotal, data: [...data, ...onewashData] };
 };
 
 service.exportData = async (userInfo, query) => {
