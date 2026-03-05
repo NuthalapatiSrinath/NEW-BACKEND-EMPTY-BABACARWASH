@@ -111,6 +111,22 @@ controller.collectPayment = async (req, res) => {
   }
 };
 
+controller.editPaymentAmount = async (req, res) => {
+  try {
+    const { user, params, body } = req;
+    const data = await service.editPaymentAmount(user, params.id, body);
+    return res.status(200).json({ statusCode: 200, message: "success", data });
+  } catch (error) {
+    if (typeof error === "string") {
+      return res.status(400).json({ statusCode: 400, message: error });
+    }
+    console.error(error);
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
+  }
+};
+
 controller.settlements = async (req, res) => {
   try {
     const { user, query } = req;

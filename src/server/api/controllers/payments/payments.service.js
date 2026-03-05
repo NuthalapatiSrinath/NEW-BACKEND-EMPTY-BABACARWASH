@@ -401,6 +401,149 @@ service.updatePayment = async (userInfo, id, payload) => {
   await PaymentsModel.updateOne({ _id: id }, updatePayload);
 };
 
+/**
+ * Edit the total amount of a payment with reason tracking.
+ * Recalculates balance and status, and updates next month's bill if it exists.
+ */
+service.editPaymentAmount = async (userInfo, id, payload) => {
+  const { new_total_amount, reason } = payload;
+
+  if (!reason || !reason.trim()) {
+    throw "Reason is required when editing payment amount";
+  }
+  if (
+    new_total_amount === undefined ||
+    new_total_amount === null ||
+    isNaN(new_total_amount)
+  ) {
+    throw "New total amount is required";
+  }
+  if (Number(new_total_amount) < 0) {
+    throw "Total amount cannot be negative";
+  }
+
+  const payment = await PaymentsModel.findOne({
+    _id: id,
+    isDeleted: false,
+  }).lean();
+  if (!payment) {
+    throw "Payment not found";
+  }
+
+  const newTotal = Number(new_total_amount);
+  const oldTotal = payment.total_amount || 0;
+  const oldBalance = payment.balance || 0;
+  const amountPaid = payment.amount_paid || 0;
+
+  // Calculate new balance
+  const newBalance = Math.max(0, newTotal - amountPaid);
+  const newStatus = amountPaid >= newTotal ? "completed" : "pending";
+
+  // Build edit history entry
+  const editEntry = {
+    old_total_amount: oldTotal,
+    new_total_amount: newTotal,
+    old_balance: oldBalance,
+    new_balance: newBalance,
+    reason: reason.trim(),
+    editedBy: userInfo._id,
+    editedByName: userInfo.name || userInfo.email || userInfo._id,
+    editedAt: new Date(),
+  };
+
+  // Update the payment
+  const updateData = {
+    total_amount: newTotal,
+    balance: newBalance,
+    status: newStatus,
+    updatedBy: userInfo._id,
+    updatedAt: new Date(),
+  };
+
+  // Generate receipt if now completed
+  if (newStatus === "completed" && !payment.receipt_no) {
+    updateData.receipt_no = `RCP${String(payment.id).padStart(6, "0")}`;
+  }
+
+  await PaymentsModel.updateOne(
+    { _id: id },
+    {
+      $set: updateData,
+      $push: { amount_edit_history: editEntry },
+    },
+  );
+
+  // If next month's bill exists for the same customer/vehicle,
+  // update its old_balance to reflect the new balance of this payment
+  const balanceDiff = newBalance - oldBalance;
+  if (balanceDiff !== 0 && payment.customer && payment.vehicle) {
+    const vehicleId = payment.vehicle._id || payment.vehicle;
+    const paymentDate = new Date(payment.createdAt);
+    const nextMonth = paymentDate.getMonth() + 1;
+    const nextYear = paymentDate.getFullYear() + Math.floor(nextMonth / 12);
+    const nextMonthIndex = nextMonth % 12;
+    const nextMonthStart = new Date(nextYear, nextMonthIndex, 1);
+    const nextMonthEnd = new Date(
+      nextYear,
+      nextMonthIndex + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
+
+    const nextMonthBill = await PaymentsModel.findOne({
+      customer: payment.customer._id || payment.customer,
+      "vehicle._id": vehicleId,
+      isDeleted: false,
+      onewash: false,
+      createdAt: { $gte: nextMonthStart, $lte: nextMonthEnd },
+    }).lean();
+
+    if (nextMonthBill) {
+      const newOldBalance = Math.max(
+        0,
+        (nextMonthBill.old_balance || 0) + balanceDiff,
+      );
+      const newNextTotal = (nextMonthBill.amount_charged || 0) + newOldBalance;
+      const newNextBalance = newNextTotal - (nextMonthBill.amount_paid || 0);
+
+      await PaymentsModel.updateOne(
+        { _id: nextMonthBill._id },
+        {
+          $set: {
+            old_balance: newOldBalance,
+            total_amount: newNextTotal,
+            balance: Math.max(0, newNextBalance),
+            status:
+              (nextMonthBill.amount_paid || 0) >= newNextTotal
+                ? "completed"
+                : "pending",
+            updatedBy: userInfo._id,
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      console.log(
+        `✅ [EDIT AMOUNT] Updated next month bill ${nextMonthBill._id}: old_balance ${nextMonthBill.old_balance} → ${newOldBalance}, total ${nextMonthBill.total_amount} → ${newNextTotal}`,
+      );
+    }
+  }
+
+  console.log(
+    `✅ [EDIT AMOUNT] Payment ${id}: total ${oldTotal} → ${newTotal}, balance ${oldBalance} → ${newBalance}, reason: ${reason}`,
+  );
+
+  return {
+    old_total: oldTotal,
+    new_total: newTotal,
+    new_balance: newBalance,
+    new_status: newStatus,
+  };
+};
+
 service.collectPayment = async (userInfo, id, payload) => {
   const paymentData = await PaymentsModel.findOne({ _id: id }).lean();
 

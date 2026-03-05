@@ -37,6 +37,11 @@ router.delete("/:id/undo", AuthHelper.authenticate, controller.undoDelete);
 router.put("/:id/update", AuthHelper.authenticate, controller.updatePayment);
 router.put("/:id/collect", AuthHelper.authenticate, controller.collectPayment);
 router.put(
+  "/:id/edit-amount",
+  AuthHelper.authenticate,
+  controller.editPaymentAmount,
+);
+router.put(
   "/collect/settle",
   AuthHelper.authenticate,
   controller.settlePayment,
