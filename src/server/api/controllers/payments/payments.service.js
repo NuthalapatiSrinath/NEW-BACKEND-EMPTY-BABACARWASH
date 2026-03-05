@@ -81,6 +81,18 @@ service.list = async (userInfo, query) => {
         ? { building: query.building }
         : null),
       ...(query.mall && query.mall.trim() !== "" ? { mall: query.mall } : null),
+      ...(query.payment_mode && query.payment_mode.trim() !== ""
+        ? {
+            payment_mode: {
+              $regex: new RegExp(
+                "^" +
+                  query.payment_mode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
+                  "$",
+                "i",
+              ),
+            },
+          }
+        : null),
       ...(query.search
         ? {
             $or: [

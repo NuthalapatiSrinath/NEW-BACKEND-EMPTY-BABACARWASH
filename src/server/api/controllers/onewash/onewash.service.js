@@ -64,6 +64,26 @@ service.list = async (userInfo, query) => {
     if (isValidId(query.building)) findQuery.building = query.building;
   }
 
+  // Status filter
+  if (query.status) {
+    findQuery.status = query.status;
+  }
+
+  // Payment mode filter
+  if (query.payment_mode && query.payment_mode.trim() !== "") {
+    findQuery.payment_mode = {
+      $regex: new RegExp(
+        "^" + query.payment_mode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$",
+        "i",
+      ),
+    };
+  }
+
+  // Wash type filter
+  if (query.wash_type && query.wash_type.trim() !== "") {
+    findQuery.wash_type = query.wash_type;
+  }
+
   if (isValidId(query.worker)) {
     findQuery.worker = query.worker;
   } else if (limitToWorkerIds) {
@@ -604,6 +624,11 @@ service.exportData = async (userInfo, query) => {
 
   if (isValidId(query.worker)) {
     findQuery.worker = query.worker;
+  }
+
+  // Status filter
+  if (query.status) {
+    findQuery.status = query.status;
   }
 
   if (query.startDate && query.startDate !== "null") {
