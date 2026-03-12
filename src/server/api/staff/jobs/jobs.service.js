@@ -9,47 +9,57 @@ const AuthHelper = require("../auth/auth.helper");
 const service = module.exports;
 
 service.list = async (userInfo, query) => {
-  // Workers' shift: 18:30 to 18:30 next day (Dubai time)
-  // If current time is before 18:30 → show yesterday 18:30 to today 18:30
-  // If current time is after 18:30 → show today 18:30 to tomorrow 18:30
+  // Residence workers use 18:30-to-18:30 shift windows.
+  // Non-residence workers use normal Dubai calendar day windows.
 
   const now = moment().tz("Asia/Dubai");
   const currentHour = now.hours();
   const currentMinute = now.minutes();
+  const useResidenceShift = userInfo.service_type === "residence";
 
   let startTime, endTime;
 
-  // Check if current time is before or after 18:30
-  if (currentHour < 18 || (currentHour === 18 && currentMinute < 30)) {
-    // Before 18:30 → show yesterday 18:30 to today 18:30
-    startTime = moment()
-      .tz("Asia/Dubai")
-      .subtract(1, "day")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
-    endTime = moment()
-      .tz("Asia/Dubai")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
+  if (useResidenceShift) {
+    // Check if current time is before or after 18:30
+    if (currentHour < 18 || (currentHour === 18 && currentMinute < 30)) {
+      // Before 18:30 → show yesterday 18:30 to today 18:30
+      startTime = moment()
+        .tz("Asia/Dubai")
+        .subtract(1, "day")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+      endTime = moment()
+        .tz("Asia/Dubai")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+    } else {
+      // After 18:30 → show today 18:30 to tomorrow 18:30
+      startTime = moment()
+        .tz("Asia/Dubai")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+      endTime = moment()
+        .tz("Asia/Dubai")
+        .add(1, "day")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+    }
   } else {
-    // After 18:30 → show today 18:30 to tomorrow 18:30
+    // Non-residence default: current Dubai calendar day
     startTime = moment()
       .tz("Asia/Dubai")
-      .hours(18)
-      .minutes(30)
+      .startOf("day")
       .seconds(0)
       .milliseconds(0);
-    endTime = moment()
-      .tz("Asia/Dubai")
-      .add(1, "day")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
+    endTime = moment().tz("Asia/Dubai").endOf("day");
   }
 
   console.log(
@@ -62,6 +72,10 @@ service.list = async (userInfo, query) => {
     startTime.format("YYYY-MM-DD HH:mm"),
     "→",
     endTime.format("YYYY-MM-DD HH:mm"),
+  );
+  console.log(
+    "📋 Window Mode:",
+    useResidenceShift ? "residence-shift" : "calendar-day",
   );
   console.log("📋 Query Status:", query.status || "pending (default)");
 

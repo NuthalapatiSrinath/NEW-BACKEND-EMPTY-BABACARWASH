@@ -1136,60 +1136,70 @@ service.supervisors = async (userInfo, body) => {
   const workers = await WorkersModel.find(findQuery);
   const workerIds = workers.map((e) => e._id.toString());
 
-  // Use the same 18:30-to-18:30 shift window as the staff app (Dubai time)
+  // Residence uses 18:30-to-18:30 shift window; others use normal calendar day window.
   const momentTz = require("moment-timezone");
   const now = momentTz().tz("Asia/Dubai");
   const currentHour = now.hours();
   const currentMinute = now.minutes();
+  const useResidenceShift = userInfo.service_type === "residence";
 
   let shiftStart, shiftEnd;
 
-  if (body.startDate && body.endDate) {
-    // Reports page sends specific date range — convert to shift-based range
-    // For date "2026-03-07", shift starts at 18:30 on 2026-03-06 and ends at 18:30 on 2026-03-07
-    shiftStart = momentTz
-      .tz(body.startDate, "Asia/Dubai")
-      .subtract(1, "day")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
-    shiftEnd = momentTz
-      .tz(body.endDate, "Asia/Dubai")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
-  } else if (currentHour < 18 || (currentHour === 18 && currentMinute < 30)) {
-    // Before 18:30 → shift is yesterday 18:30 to today 18:30
-    shiftStart = momentTz()
-      .tz("Asia/Dubai")
-      .subtract(1, "day")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
-    shiftEnd = momentTz()
-      .tz("Asia/Dubai")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
+  if (useResidenceShift) {
+    if (body.startDate && body.endDate) {
+      // Reports page sends specific date range — convert to shift-based range
+      shiftStart = momentTz
+        .tz(body.startDate, "Asia/Dubai")
+        .subtract(1, "day")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+      shiftEnd = momentTz
+        .tz(body.endDate, "Asia/Dubai")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+    } else if (currentHour < 18 || (currentHour === 18 && currentMinute < 30)) {
+      // Before 18:30 → shift is yesterday 18:30 to today 18:30
+      shiftStart = momentTz()
+        .tz("Asia/Dubai")
+        .subtract(1, "day")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+      shiftEnd = momentTz()
+        .tz("Asia/Dubai")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+    } else {
+      // After 18:30 → shift is today 18:30 to tomorrow 18:30
+      shiftStart = momentTz()
+        .tz("Asia/Dubai")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+      shiftEnd = momentTz()
+        .tz("Asia/Dubai")
+        .add(1, "day")
+        .hours(18)
+        .minutes(30)
+        .seconds(0)
+        .milliseconds(0);
+    }
   } else {
-    // After 18:30 → shift is today 18:30 to tomorrow 18:30
-    shiftStart = momentTz()
-      .tz("Asia/Dubai")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
-    shiftEnd = momentTz()
-      .tz("Asia/Dubai")
-      .add(1, "day")
-      .hours(18)
-      .minutes(30)
-      .seconds(0)
-      .milliseconds(0);
+    if (body.startDate && body.endDate) {
+      shiftStart = momentTz.tz(body.startDate, "Asia/Dubai").startOf("day");
+      shiftEnd = momentTz.tz(body.endDate, "Asia/Dubai").endOf("day");
+    } else {
+      shiftStart = momentTz().tz("Asia/Dubai").startOf("day");
+      shiftEnd = momentTz().tz("Asia/Dubai").endOf("day");
+    }
   }
 
   // The "shift date" is the date the shift counts towards

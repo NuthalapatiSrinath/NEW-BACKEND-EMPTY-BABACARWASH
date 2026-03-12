@@ -787,30 +787,33 @@ service.monthlyRecords = async (userInfo, query) => {
   const year = parseInt(query.year);
   const month = parseInt(query.month); // 0 = Jan
   const targetWorkerId = query.workerId;
+  const useResidenceShift = userInfo?.service_type === "residence";
 
   if (isNaN(year) || isNaN(month)) {
     throw new Error("Invalid Year or Month");
   }
 
-  // Shift window: 18:30 Dubai (14:30 UTC) to next day 18:30 Dubai (14:30 UTC)
-  // Day 1 shift = prev month last day 14:30 UTC → day 1 14:30 UTC
-  // Day N shift = (N-1) 14:30 UTC → N 14:30 UTC
+  // Residence mode uses shift window: 18:30 Dubai (14:30 UTC) to next day 18:30 Dubai.
+  // Non-residence mode uses normal calendar month/day boundaries.
   const daysInMonth = moment(new Date(year, month, 1)).daysInMonth();
 
-  // Shift start for day 1: previous month last day at 14:30 UTC
-  const monthShiftStart = moment
-    .utc(new Date(year, month, 1))
-    .subtract(1, "day")
-    .set({ hour: 14, minute: 30, second: 0, millisecond: 0 });
-  // Shift end for last day: last day of month at 14:30 UTC
-  const monthShiftEnd = moment
-    .utc(new Date(year, month, daysInMonth))
-    .set({ hour: 14, minute: 30, second: 0, millisecond: 0 });
+  const monthStart = useResidenceShift
+    ? moment
+        .utc(new Date(year, month, 1))
+        .subtract(1, "day")
+        .set({ hour: 14, minute: 30, second: 0, millisecond: 0 })
+    : moment.utc(new Date(year, month, 1)).startOf("day");
+
+  const monthEnd = useResidenceShift
+    ? moment
+        .utc(new Date(year, month, daysInMonth))
+        .set({ hour: 14, minute: 30, second: 0, millisecond: 0 })
+    : moment.utc(new Date(year, month, daysInMonth)).endOf("day");
 
   // 1. Build Queries — use completedDate/createdAt within the full month shift range
   const onewashQuery = {
     isDeleted: false,
-    createdAt: { $gte: monthShiftStart.toDate(), $lte: monthShiftEnd.toDate() },
+    createdAt: { $gte: monthStart.toDate(), $lte: monthEnd.toDate() },
     worker: { $exists: true, $ne: null },
   };
 
@@ -818,8 +821,8 @@ service.monthlyRecords = async (userInfo, query) => {
     isDeleted: false,
     status: "completed",
     completedDate: {
-      $gte: monthShiftStart.toDate(),
-      $lte: monthShiftEnd.toDate(),
+      $gte: monthStart.toDate(),
+      $lte: monthEnd.toDate(),
     },
     worker: { $exists: true, $ne: null },
   };
@@ -848,11 +851,17 @@ service.monthlyRecords = async (userInfo, query) => {
       .lean(),
   ]);
 
-  // 3. Aggregate — assign each record to the correct shift day
-  // Shift day N: (N-1) 14:30 UTC → N 14:30 UTC
+  // 3. Aggregate day mapping
+  // Residence: shift day N is (N-1) 14:30 UTC → N 14:30 UTC
+  // Non-residence: normal calendar day mapping
   const getShiftDay = (dateVal) => {
     const m = moment.utc(dateVal);
     const dayOfMonth = m.date();
+
+    if (!useResidenceShift) {
+      return dayOfMonth;
+    }
+
     const hour = m.hour();
     const minute = m.minute();
     // If before 14:30 UTC (18:30 Dubai), belongs to current calendar day's shift

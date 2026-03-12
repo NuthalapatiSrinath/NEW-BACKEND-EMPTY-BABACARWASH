@@ -460,7 +460,9 @@ service.monthlyStatement = async (userInfo, query) => {
     findQuery.worker = query.workerId;
   } else if (query.workers) {
     // Support workers[] array param (e.g. from supervisor frontend for team filtering)
-    const workerIds = Array.isArray(query.workers) ? query.workers : [query.workers];
+    const workerIds = Array.isArray(query.workers)
+      ? query.workers
+      : [query.workers];
     findQuery.worker = { $in: workerIds };
   }
 

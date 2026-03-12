@@ -1144,7 +1144,40 @@ service.monthlyStatement = async (userInfo, query) => {
       schedule: vehicle
         ? vehicle.schedule_type === "daily"
           ? "Daily"
-          : `Weekly (${vehicle.schedule_days?.length || 0})`
+          : (() => {
+              let dayCount = 1;
+              let daysList = "";
+
+              if (
+                vehicle.schedule_days &&
+                Array.isArray(vehicle.schedule_days)
+              ) {
+                if (
+                  vehicle.schedule_days.length === 1 &&
+                  typeof vehicle.schedule_days[0] === "string"
+                ) {
+                  // Handle case where schedule_days is ["Mon,Wed,Fri"] - array with one comma-separated string
+                  const days = vehicle.schedule_days[0]
+                    .split(",")
+                    .filter((day) => day.trim());
+                  dayCount = days.length;
+                  daysList = days.map((day) => day.trim()).join(",");
+                } else {
+                  // Handle case where schedule_days is ["Mon", "Wed", "Fri"] - array of individual days
+                  dayCount = vehicle.schedule_days.length;
+                  daysList = vehicle.schedule_days.join(",");
+                }
+              } else if (typeof vehicle.schedule_days === "string") {
+                // Handle case where schedule_days is "Mon,Wed,Fri" - direct string
+                const days = vehicle.schedule_days
+                  .split(",")
+                  .filter((day) => day.trim());
+                dayCount = days.length;
+                daysList = days.map((day) => day.trim()).join(",");
+              }
+
+              return `Weekly (${dayCount}) - ${daysList}`;
+            })()
         : "-", // 7. Weekly Schedule
       advance: vehicle?.advance_amount || 0, // 8. Advance Payment Amount (show actual amount instead of Yes/No)
       subAmount: subscriptionAmount, // 9. Subscription Amount
@@ -1774,13 +1807,13 @@ service.monthlyStatement = async (userInfo, query) => {
   console.log("👉 Filters Received:", JSON.stringify(query, null, 2));
 
   // 1. Setup Date Range
-  const startOfMonth = moment(new Date(query.year, query.month, 1))
+  const startOfMonth = moment
+    .utc([query.year, query.month, 1])
     .startOf("month")
-    .utc()
     .format();
-  const endOfMonth = moment(new Date(query.year, query.month, 1))
+  const endOfMonth = moment
+    .utc([query.year, query.month, 1])
     .endOf("month")
-    .utc()
     .format();
 
   const findQuery = {
@@ -1846,7 +1879,50 @@ service.monthlyStatement = async (userInfo, query) => {
       schedule: vehicle
         ? vehicle.schedule_type === "daily"
           ? "Daily"
-          : `Weekly (${vehicle.schedule_days?.length || 0})`
+          : (() => {
+              console.log("🔍 Vehicle Schedule Debug:", {
+                schedule_type: vehicle.schedule_type,
+                schedule_days: vehicle.schedule_days,
+                schedule_days_type: typeof vehicle.schedule_days,
+                schedule_days_length: vehicle.schedule_days
+                  ? vehicle.schedule_days.length
+                  : "N/A",
+                is_array: Array.isArray(vehicle.schedule_days),
+              });
+
+              let dayCount = 1;
+              let daysList = "";
+
+              if (
+                vehicle.schedule_days &&
+                Array.isArray(vehicle.schedule_days)
+              ) {
+                if (
+                  vehicle.schedule_days.length === 1 &&
+                  typeof vehicle.schedule_days[0] === "string"
+                ) {
+                  // Handle case where schedule_days is ["Mon,Wed,Fri"] - array with one comma-separated string
+                  const days = vehicle.schedule_days[0]
+                    .split(",")
+                    .filter((day) => day.trim());
+                  dayCount = days.length;
+                  daysList = days.map((day) => day.trim()).join(",");
+                } else {
+                  // Handle case where schedule_days is ["Mon", "Wed", "Fri"] - array of individual days
+                  dayCount = vehicle.schedule_days.length;
+                  daysList = vehicle.schedule_days.join(",");
+                }
+              } else if (typeof vehicle.schedule_days === "string") {
+                // Handle case where schedule_days is "Mon,Wed,Fri" - direct string
+                const days = vehicle.schedule_days
+                  .split(",")
+                  .filter((day) => day.trim());
+                dayCount = days.length;
+                daysList = days.map((day) => day.trim()).join(",");
+              }
+
+              return `Weekly (${dayCount}) - ${daysList}`;
+            })()
         : "-",
       advance: vehicle?.advance_amount || 0,
       subAmount: subscriptionAmount,

@@ -1,12 +1,35 @@
-const router = require('express').Router()
-const controller = require('./attendance.controller')
-const AuthHelper = require('../auth/auth.helper')
+const router = require("express").Router();
+const controller = require("./attendance.controller");
+const AuthHelper = require("../auth/auth.helper");
+const { hasAccess } = require("../../middleware/permissions.middleware");
 
-router.get('/org/list', AuthHelper.authenticate, controller.orgList);
+const MODULE = "attendance";
 
-router.get('/', AuthHelper.authenticate, controller.list);
-router.put('/', AuthHelper.authenticate, controller.update);
+router.get(
+  "/org/list",
+  AuthHelper.authenticate,
+  hasAccess(MODULE, "view"),
+  controller.orgList,
+);
 
-router.get('/export/list', AuthHelper.authenticate, controller.exportData);
+router.get(
+  "/",
+  AuthHelper.authenticate,
+  hasAccess(MODULE, "view"),
+  controller.list,
+);
+router.put(
+  "/",
+  AuthHelper.authenticate,
+  hasAccess(MODULE, "edit"),
+  controller.update,
+);
 
-module.exports = router
+router.get(
+  "/export/list",
+  AuthHelper.authenticate,
+  hasAccess(MODULE, "view"),
+  controller.exportData,
+);
+
+module.exports = router;

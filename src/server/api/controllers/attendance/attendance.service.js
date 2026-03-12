@@ -8,6 +8,45 @@ const InAppNotifications = require("../../../notifications/in-app.notifications"
 
 const service = module.exports;
 
+const buildSiteScopeFilter = async (query) => {
+  const staffQuery = {
+    isDeleted: false,
+    ...(query.site ? { site: query.site } : null),
+  };
+  const workerQuery = {
+    isDeleted: false,
+    service_type: "site",
+    ...(query.site
+      ? {
+          sites: {
+            $in: Array.isArray(query.site) ? query.site : [query.site],
+          },
+        }
+      : null),
+  };
+
+  const [staffData, workerData] = await Promise.all([
+    StaffModel.find(staffQuery, { _id: 1 }).lean(),
+    WorkersModel.find(workerQuery, { _id: 1 }).lean(),
+  ]);
+
+  const scope = [];
+
+  if (workerData.length > 0) {
+    scope.push({
+      worker: { $in: workerData.map((item) => item._id.toString()) },
+    });
+  }
+
+  if (staffData.length > 0) {
+    scope.push({
+      staff: { $in: staffData.map((item) => item._id.toString()) },
+    });
+  }
+
+  return scope;
+};
+
 service.orgList = async (userInfo, query) => {
   const WorkersData = await WorkersModel.find({ isDeleted: false }).lean();
   const StaffData = await StaffModel.find({ isDeleted: false }).lean();
@@ -33,19 +72,29 @@ service.list = async (userInfo, query) => {
             $in: Array.isArray(query.workers) ? query.workers : [query.workers],
           },
         }
-      : query.worker
-        ? { $or: [{ worker: query.worker }, { staff: query.worker }] }
-        : null),
+      : null),
   };
+
+  if (query.worker && !query.workers) {
+    findQuery.$or = [{ worker: query.worker }, { staff: query.worker }];
+  }
 
   if (!query.workers) {
     if (query.premise == "site") {
-      const staffQuery = {
-        isDeleted: false,
-        ...(query.site ? { site: query.site } : null),
-      };
-      const staffData = await StaffModel.find(staffQuery, { _id: 1 }).lean();
-      findQuery.staff = { $in: staffData.map((e) => e._id) };
+      const siteScope = await buildSiteScopeFilter(query);
+
+      if (siteScope.length === 0) {
+        return { data: [] };
+      }
+
+      if (findQuery.$or) {
+        findQuery.$and = [{ $or: findQuery.$or }, { $or: siteScope }];
+        delete findQuery.$or;
+      } else if (siteScope.length === 1) {
+        Object.assign(findQuery, siteScope[0]);
+      } else {
+        findQuery.$or = siteScope;
+      }
     }
 
     if (["mall", "residence"].includes(query.premise)) {
@@ -65,7 +114,7 @@ service.list = async (userInfo, query) => {
           : null),
       };
       const staffData = await WorkersModel.find(workerQuery, { _id: 1 }).lean();
-      findQuery.worker = { $in: staffData.map((e) => e._id) };
+      findQuery.worker = { $in: staffData.map((e) => e._id.toString()) };
     }
   }
 
@@ -115,18 +164,25 @@ service.exportData = async (userInfo, query) => {
     ...(query.search
       ? { $or: [{ name: { $regex: query.search, $options: "i" } }] }
       : null),
-    ...(query.worker
-      ? { $or: [{ worker: query.worker }, { staff: query.worker }] }
-      : null),
   };
 
+  if (query.worker) {
+    findQuery.$or = [{ worker: query.worker }, { staff: query.worker }];
+  }
+
   if (query.premise == "site") {
-    const staffQuery = {
-      isDeleted: false,
-      ...(query.site ? { site: query.site } : null),
-    };
-    const staffData = await StaffModel.find(staffQuery, { _id: 1 }).lean();
-    findQuery.staff = { $in: staffData.map((e) => e._id) };
+    const siteScope = await buildSiteScopeFilter(query);
+
+    if (siteScope.length === 0) {
+      findQuery.$or = [{ worker: { $in: [] } }, { staff: { $in: [] } }];
+    } else if (findQuery.$or) {
+      findQuery.$and = [{ $or: findQuery.$or }, { $or: siteScope }];
+      delete findQuery.$or;
+    } else if (siteScope.length === 1) {
+      Object.assign(findQuery, siteScope[0]);
+    } else {
+      findQuery.$or = siteScope;
+    }
   }
 
   if (["mall", "residence"].includes(query.premise)) {
@@ -146,7 +202,7 @@ service.exportData = async (userInfo, query) => {
         : null),
     };
     const staffData = await WorkersModel.find(workerQuery, { _id: 1 }).lean();
-    findQuery.worker = { $in: staffData.map((e) => e._id) };
+    findQuery.worker = { $in: staffData.map((e) => e._id.toString()) };
   }
 
   const data = await AttendanceModel.find(findQuery)
@@ -288,20 +344,29 @@ service.exportData = async (userInfo, query) => {
 
       let cellValue = "";
 
-      // Check if it's OFF day (Friday or Sunday)
-      if (dayName === "FR" || dayName === "SU") {
-        cellValue = "OFF";
-      } else {
-        totalDays++;
-        if (attendance) {
-          if (attendance.present) {
-            cellValue = "P";
-            presents++;
-            dailyTotals[index]++;
-          } else {
-            cellValue = attendance.type?.toUpperCase() || "AB";
+      if (attendance) {
+        if (attendance.present) {
+          cellValue = "P";
+          presents++;
+          dailyTotals[index]++;
+          totalDays++;
+        } else {
+          // Use type field first (for attendance codes like WO, AB, ND, SL),
+          // then fall back to "AB" if no type is set
+          cellValue = attendance.type?.toUpperCase() || "AB";
+          if (cellValue !== "WO") {
             absents++;
+            totalDays++;
           }
+        }
+      } else {
+        // No attendance record - check if it's a regular OFF day (Friday or Sunday)
+        if (dayName === "FR" || dayName === "SU") {
+          cellValue = "OFF";
+          // OFF days don't count toward working days
+        } else {
+          // Working day with no record - count as working day but absent
+          totalDays++;
         }
       }
 
@@ -333,6 +398,12 @@ service.exportData = async (userInfo, query) => {
             type: "pattern",
             pattern: "solid",
             fgColor: { argb: "FFFFC7CE" },
+          };
+        } else if (value === "WO") {
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFD9F2E6" },
           };
         } else if (value === "P") {
           cell.fill = {
