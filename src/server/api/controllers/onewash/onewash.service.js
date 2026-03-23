@@ -916,6 +916,20 @@ service.monthlyStatement = async (userInfo, query) => {
     ])
     .lean();
 
+  const statusCounts = {
+    total: 0,
+    completed: 0,
+    pending: 0,
+    rejected: 0,
+  };
+  for (const item of data) {
+    statusCounts.total++;
+    const status = String(item.status || "").toLowerCase();
+    if (status === "completed") statusCounts.completed++;
+    else if (status === "pending") statusCounts.pending++;
+    else if (status === "rejected") statusCounts.rejected++;
+  }
+
   const daysInMonth = moment(findQuery.createdAt.$gte).daysInMonth();
 
   // ✅ 1. Return JSON with DAILY data if format=json
@@ -932,6 +946,9 @@ service.monthlyStatement = async (userInfo, query) => {
             code: iterator.worker.employeeCode || "N/A",
             totalCars: 0,
             amount: 0,
+            internalCount: 0,
+            externalCount: 0,
+            internalExternalCount: 0,
             daily: new Array(daysInMonth).fill(0), // Array of 31 zeros
           };
         }
@@ -940,6 +957,15 @@ service.monthlyStatement = async (userInfo, query) => {
         const date = moment(iterator.createdAt).date();
         if (date >= 1 && date <= daysInMonth) {
           workerMap[wid].daily[date - 1]++;
+        }
+
+        const washType = String(iterator.wash_type || "").toLowerCase();
+        if (washType === "inside") {
+          workerMap[wid].internalCount++;
+        } else if (washType === "outside") {
+          workerMap[wid].externalCount++;
+        } else if (washType === "total") {
+          workerMap[wid].internalExternalCount++;
         }
 
         workerMap[wid].totalCars++;
@@ -965,6 +991,7 @@ service.monthlyStatement = async (userInfo, query) => {
       columnTotals,
       grandTotal,
       totalTips,
+      statusCounts,
     };
   }
 
@@ -973,7 +1000,20 @@ service.monthlyStatement = async (userInfo, query) => {
   const reportSheet = workbook.addWorksheet("Report");
 
   const days = [1, ...new Array(daysInMonth - 1).fill(0).map((_, i) => i + 2)];
-  const keys = ["Sl. No", "Name", ...days, "Total Cars", "Tips Amount"];
+  const isMallStatement =
+    String(query.service_type || "").toLowerCase() === "mall";
+  const keys = isMallStatement
+    ? [
+        "Sl. No",
+        "Name",
+        ...days,
+        "Internal",
+        "External",
+        "Int+Ext",
+        "Total Cars",
+        "Tips Amount",
+      ]
+    : ["Sl. No", "Name", ...days, "Total Cars", "Tips Amount"];
 
   reportSheet.addRow(keys);
 
@@ -992,10 +1032,22 @@ service.monthlyStatement = async (userInfo, query) => {
     let daywiseCounts = {};
     let tipAmount = 0;
     let totalCars = 0;
+    let internalCount = 0;
+    let externalCount = 0;
+    let internalExternalCount = 0;
 
     for (const iterator of workerData) {
       let date = moment(iterator.createdAt).date();
       daywiseCounts[date] = (daywiseCounts[date] || 0) + 1;
+
+      const washType = String(iterator.wash_type || "").toLowerCase();
+      if (washType === "inside") {
+        internalCount++;
+      } else if (washType === "outside") {
+        externalCount++;
+      } else if (washType === "total") {
+        internalExternalCount++;
+      }
     }
 
     for (const day of days) {
@@ -1010,13 +1062,62 @@ service.monthlyStatement = async (userInfo, query) => {
 
     const dayValues = days.map((d) => daywiseCounts[d] || "");
 
-    reportSheet.addRow([
-      count++,
-      workerData[0].worker?.name?.trim() || "Unknown",
-      ...dayValues,
-      totalCars,
-      tipAmount,
-    ]);
+    if (isMallStatement) {
+      reportSheet.addRow([
+        count++,
+        workerData[0].worker?.name?.trim() || "Unknown",
+        ...dayValues,
+        internalCount,
+        externalCount,
+        internalExternalCount,
+        totalCars,
+        tipAmount,
+      ]);
+    } else {
+      reportSheet.addRow([
+        count++,
+        workerData[0].worker?.name?.trim() || "Unknown",
+        ...dayValues,
+        totalCars,
+        tipAmount,
+      ]);
+    }
+  }
+
+  reportSheet.addRow([]);
+  const statusHeaderRow = reportSheet.addRow(["", "STATUS SUMMARY"]);
+  statusHeaderRow.getCell(2).font = {
+    bold: true,
+    color: { argb: "FFFFFF" },
+  };
+  statusHeaderRow.getCell(2).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "1F4E78" },
+  };
+
+  const statusRow = reportSheet.addRow([
+    "",
+    "Total Washes",
+    statusCounts.total,
+    "Completed",
+    statusCounts.completed,
+    "Pending",
+    statusCounts.pending,
+    "Rejected",
+    statusCounts.rejected,
+  ]);
+
+  for (let col = 2; col <= 9; col++) {
+    const cell = statusRow.getCell(col);
+    cell.font = { bold: true };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
   }
 
   return workbook;

@@ -489,9 +489,30 @@ service.monthlyStatement = async (userInfo, query) => {
     ])
     .lean();
 
+  const statusFindQuery = { ...findQuery };
+  delete statusFindQuery.status;
+  const statusJobs = await JobsModel.find(statusFindQuery)
+    .select("status")
+    .lean();
+
+  const statusCounts = {
+    total: 0,
+    completed: 0,
+    pending: 0,
+    rejected: 0,
+  };
+  for (const job of statusJobs) {
+    statusCounts.total++;
+    const status = String(job.status || "").toLowerCase();
+    if (status === "completed") statusCounts.completed++;
+    else if (status === "pending") statusCounts.pending++;
+    else if (status === "rejected") statusCounts.rejected++;
+  }
+
   const daysInMonth = moment(findQuery.assignedDate.$gte).daysInMonth();
   const monthName = moment(findQuery.assignedDate.$gte).format("MMMM");
   const year = moment(findQuery.assignedDate.$gte).format("YYYY");
+  let selectedWorkerCarList = null;
 
   // =========================================================
   // SCENARIO 1: WORKER SELECTED (Residence only) - SHOW SCHEDULE
@@ -693,6 +714,7 @@ service.monthlyStatement = async (userInfo, query) => {
     });
 
     const carList = Array.from(carMap.values());
+    selectedWorkerCarList = carList;
 
     // If format is JSON (For PDF/Preview), return raw data with totals
     if (query.format === "json") {
@@ -714,6 +736,7 @@ service.monthlyStatement = async (userInfo, query) => {
         columnTotals,
         grandTotal,
         totalTips,
+        statusCounts,
       };
     }
 
@@ -779,6 +802,7 @@ service.monthlyStatement = async (userInfo, query) => {
       columnTotals,
       grandTotal,
       totalTips,
+      statusCounts,
     };
   }
 
@@ -792,13 +816,12 @@ service.monthlyStatement = async (userInfo, query) => {
   reportSheet.getRow(1).height = 40;
   reportSheet.getRow(2).height = 20;
 
-  const isWorkerSelected = query.workerId && data.length > 0;
+  const isWorkerSelected = !!(
+    query.workerId && String(query.workerId).trim() !== ""
+  );
   const selectedWorkerName = isWorkerSelected
     ? data[0]?.worker?.name
     : "ALL WORKERS";
-  const locationName = isWorkerSelected
-    ? data[0]?.location?.name
-    : "RESIDENCE LOCATIONS";
 
   // --- HEADER ROW 1: Company Name with Logo Space ---
   // Adjusted columns to include "Customer ID", "Mobile", and "Tips" columns
@@ -858,9 +881,9 @@ service.monthlyStatement = async (userInfo, query) => {
     right: { style: "thin" },
   };
 
-  // --- HEADER ROW 2: Month/Location/Cleaner info ---
+  // --- HEADER ROW 2: Month/Cleaner info ---
   if (isWorkerSelected) {
-    reportSheet.mergeCells(2, 1, 2, Math.ceil(totalCols / 3));
+    reportSheet.mergeCells(2, 1, 2, Math.ceil(totalCols / 2));
     const monthCell = reportSheet.getCell("A2");
     monthCell.value = `Month & Year: ${monthName.toUpperCase()} ${year}`;
     monthCell.font = { bold: true, size: 10 };
@@ -871,21 +894,9 @@ service.monthlyStatement = async (userInfo, query) => {
       fgColor: { argb: "D9D9D9" },
     };
 
-    const midCol = Math.ceil(totalCols / 3) + 1;
-    const endCol = Math.ceil((totalCols * 2) / 3);
-    reportSheet.mergeCells(2, midCol, 2, endCol);
-    const locationCell = reportSheet.getCell(2, midCol);
-    locationCell.value = `LOCATION: ${locationName}`;
-    locationCell.font = { bold: true, size: 10 };
-    locationCell.alignment = { horizontal: "center", vertical: "middle" };
-    locationCell.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "D9D9D9" },
-    };
-
-    reportSheet.mergeCells(2, endCol + 1, 2, totalCols);
-    const cleanerCell = reportSheet.getCell(2, endCol + 1);
+    const midCol = Math.ceil(totalCols / 2) + 1;
+    reportSheet.mergeCells(2, midCol, 2, totalCols);
+    const cleanerCell = reportSheet.getCell(2, midCol);
     cleanerCell.value = `CLEANER'S NAME: ${selectedWorkerName}`;
     cleanerCell.font = { bold: true, size: 10 };
     cleanerCell.alignment = { horizontal: "center", vertical: "middle" };
@@ -1034,121 +1045,36 @@ service.monthlyStatement = async (userInfo, query) => {
   let dataSource;
 
   if (isWorkerSelected) {
-    // We already calculated the carMap above for JSON, we can regenerate or reuse.
-    // Regenerating for clean Excel logic scope:
-    const carMapExcel = new Map();
-    data.forEach((job) => {
-      let vehicleInfo = null;
-      if (job.customer && job.customer.vehicles && job.vehicle) {
-        vehicleInfo = job.customer.vehicles.find(
-          (v) => v._id.toString() === job.vehicle.toString(),
-        );
-      }
-      const carKey = job.vehicle
-        ? job.vehicle.toString()
-        : `unknown_${job._id}`;
-      const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
-
-      if (!carMapExcel.has(carKey)) {
-        // Calculate cleaning indicator for this vehicle
-        let cleaningIndicator = "W3"; // default
-        if (job.immediate) {
-          cleaningIndicator = "D";
-        } else if (vehicleInfo?.schedule_days) {
-          // Parse schedule_days to count actual days
-          let dayCount = 0;
-          if (typeof vehicleInfo.schedule_days === "string") {
-            dayCount = vehicleInfo.schedule_days
-              .split(",")
-              .filter((d) => d.trim()).length;
-          } else if (Array.isArray(vehicleInfo.schedule_days)) {
-            dayCount = vehicleInfo.schedule_days.length;
-          }
-          if (dayCount > 0) {
-            cleaningIndicator = `W${dayCount}`;
-          }
-        }
-
-        carMapExcel.set(carKey, {
-          customerId: job.customer?.id || job.customer?._id || "",
-          customerMobile: job.customer?.mobile || "",
-          parkingNo: vehicleInfo?.parking_no || "",
-          carNumber: vehicleInfo?.registration_no || "",
-          dateOfStart: moment(job.assignedDate).format("DD-MMM"),
-          cleaning: cleaningIndicator,
-          dailyMarks: Array(daysInMonth).fill(0),
-          amount: job.price || 0,
-          duDate: moment(job.completedDate || job.assignedDate).format(
-            "DD-MMM",
-          ),
-          tips: 0,
-        });
-      }
-      const carData = carMapExcel.get(carKey);
-      carData.tips += Number(job.tips) || 0; // Sum tips
-      if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth)
-        carData.dailyMarks[dayOfMonth - 1]++;
-    });
-    dataSource = Array.from(carMapExcel.values());
+    dataSource = Array.isArray(selectedWorkerCarList)
+      ? selectedWorkerCarList
+      : [];
   } else {
     dataSource = workerSummaries; // We can reuse this from JSON calculation earlier
   }
 
-  // Sort dataSource by mobile number to group vehicles from same customer (same mobile)
-  if (isWorkerSelected) {
+  // Sort dataSource for stable output
+  if (isWorkerSelected && Array.isArray(dataSource)) {
     dataSource.sort((a, b) => {
-      const mobileA = a.customerMobile || "";
-      const mobileB = b.customerMobile || "";
-      // Secondary sort by customer ID for consistency
-      if (mobileA === mobileB) {
-        const idA = a.customerId || "";
-        const idB = b.customerId || "";
-        return String(idA).localeCompare(String(idB));
-      }
-      return String(mobileA).localeCompare(String(mobileB));
+      const mobileA = String(a.customerMobile || "");
+      const mobileB = String(b.customerMobile || "");
+      if (mobileA !== mobileB) return mobileA.localeCompare(mobileB);
+
+      const carA = String(a.carNumber || "");
+      const carB = String(b.carNumber || "");
+      return carA.localeCompare(carB);
     });
   }
 
-  let lastMobile = null;
   for (const item of dataSource) {
     let rowData;
     if (isWorkerSelected) {
       // Calculate row total for car
       const rowTotal = item.dailyMarks.reduce((a, b) => a + b, 0);
 
-      // Grouping logic:
-      // - If mobile exists and is same as last → group together (don't show S.NO)
-      // - If mobile is empty/missing → ALWAYS separate row (show S.NO)
-      // - If mobile exists but different → separate row (show S.NO)
-      const currentMobile = item.customerMobile || "";
-
-      console.log("\n=== EXCEL ROW GROUPING DEBUG ===");
-      console.log("Parking:", item.parkingNo, "| Car:", item.carNumber);
-      console.log("Customer ID:", item.customerId);
-      console.log(
-        "Current Mobile:",
-        currentMobile,
-        "(empty?",
-        !currentMobile,
-        ")",
-      );
-      console.log("Last Mobile:", lastMobile);
-      console.log("Mobile !== Last?", currentMobile !== lastMobile);
-
-      // IMPORTANT: If no mobile, always show customer info (each vehicle gets own row)
-      // If mobile exists, only group if it matches the last mobile
-      const showCustomerInfo = !currentMobile || currentMobile !== lastMobile;
-
-      console.log("Show Customer Info?", showCustomerInfo);
-      console.log("Row Number:", showCustomerInfo ? rowNumber : "GROUPED");
-      console.log("=================================\n");
-
-      lastMobile = currentMobile;
-
       rowData = [
-        showCustomerInfo ? rowNumber : "",
-        showCustomerInfo ? item.customerId || "" : "",
-        showCustomerInfo ? item.customerMobile || "" : "",
+        rowNumber,
+        item.customerId || "",
+        item.customerMobile || "",
         item.parkingNo,
         item.carNumber,
         item.dateOfStart,
@@ -1159,7 +1085,7 @@ service.monthlyStatement = async (userInfo, query) => {
         item.duDate,
       ];
 
-      if (showCustomerInfo) rowNumber++;
+      rowNumber++;
     } else {
       const rowTotal = item.dailyCounts.reduce((a, b) => a + b, 0);
       rowData = [
@@ -1215,12 +1141,17 @@ service.monthlyStatement = async (userInfo, query) => {
   let totalAllCars = 0;
 
   if (isWorkerSelected) {
-    data.forEach((job) => {
-      const dayOfMonth = moment(job.assignedDate).tz("Asia/Dubai").date();
-      if (dayOfMonth >= 1 && dayOfMonth <= daysInMonth)
-        dayCounts[dayOfMonth - 1]++;
-      totalAllTips += Number(job.tips) || 0;
-      totalAllCars++;
+    dataSource.forEach((car) => {
+      if (Array.isArray(car.dailyMarks)) {
+        car.dailyMarks.forEach((mark, dayIndex) => {
+          dayCounts[dayIndex] += Number(mark) || 0;
+        });
+        totalAllCars += car.dailyMarks.reduce(
+          (a, b) => a + (Number(b) || 0),
+          0,
+        );
+      }
+      totalAllTips += Number(car.tips) || 0;
     });
   } else {
     workerSummaries.forEach((worker) => {
@@ -1237,6 +1168,8 @@ service.monthlyStatement = async (userInfo, query) => {
     summaryRow = reportSheet.addRow([
       "",
       "Total Cleaned Cars",
+      "",
+      "",
       "",
       "",
       "",
@@ -1271,7 +1204,7 @@ service.monthlyStatement = async (userInfo, query) => {
     if (colNumber === 2)
       cell.alignment = { horizontal: "left", vertical: "middle" };
 
-    const dayColumnStart = isWorkerSelected ? 5 : 2;
+    const dayColumnStart = isWorkerSelected ? 7 : 2;
     if (
       colNumber > dayColumnStart &&
       colNumber <= dayColumnStart + daysInMonth
@@ -1289,6 +1222,48 @@ service.monthlyStatement = async (userInfo, query) => {
     }
   });
 
+  // --- STATUS SUMMARY ---
+  const statusTitleRow = reportSheet.addRow([]);
+  const statusHeader = reportSheet.addRow(["", "STATUS SUMMARY"]);
+  statusHeader.getCell(2).font = {
+    bold: true,
+    color: { argb: "FFFFFF" },
+  };
+  statusHeader.getCell(2).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "1F4E78" },
+  };
+
+  const statusRow = reportSheet.addRow([
+    "",
+    "Total Washes",
+    statusCounts.total,
+    "Completed",
+    statusCounts.completed,
+    "Pending",
+    statusCounts.pending,
+    "Rejected",
+    statusCounts.rejected,
+  ]);
+
+  for (let col = 2; col <= 9; col++) {
+    const cell = statusRow.getCell(col);
+    cell.font = { bold: true, size: 9 };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "E8EEF7" },
+    };
+  }
+
   // Set column widths
   if (isWorkerSelected) {
     reportSheet.getColumn(1).width = 6;
@@ -1296,12 +1271,14 @@ service.monthlyStatement = async (userInfo, query) => {
     reportSheet.getColumn(3).width = 15;
     reportSheet.getColumn(4).width = 12;
     reportSheet.getColumn(5).width = 10;
-    for (let i = 6; i <= 5 + daysInMonth; i++) {
+    reportSheet.getColumn(6).width = 12;
+    reportSheet.getColumn(7).width = 10;
+    for (let i = 8; i <= 7 + daysInMonth; i++) {
       reportSheet.getColumn(i).width = 3.5;
     }
-    reportSheet.getColumn(6 + daysInMonth).width = 10;
-    reportSheet.getColumn(7 + daysInMonth).width = 10;
-    reportSheet.getColumn(8 + daysInMonth).width = 10; // DU Date
+    reportSheet.getColumn(8 + daysInMonth).width = 10;
+    reportSheet.getColumn(9 + daysInMonth).width = 10;
+    reportSheet.getColumn(10 + daysInMonth).width = 10; // DU Date
   } else {
     reportSheet.getColumn(1).width = 8;
     reportSheet.getColumn(2).width = 20;
