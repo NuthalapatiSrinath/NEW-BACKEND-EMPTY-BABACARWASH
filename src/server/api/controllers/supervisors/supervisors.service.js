@@ -63,6 +63,7 @@ service.create = async (userInfo, payload) => {
     updatedBy: userInfo._id,
     role: "supervisor",
     hPassword: AuthHelper.getPasswordHash(payload.password),
+    passwordChangedAt: new Date(),
   };
   await new UsersModel(data).save();
 
@@ -95,6 +96,7 @@ service.update = async (userInfo, id, payload) => {
       ? {
           password: password,
           hPassword: AuthHelper.getPasswordHash(password),
+          passwordChangedAt: new Date(),
         }
       : {}),
   };

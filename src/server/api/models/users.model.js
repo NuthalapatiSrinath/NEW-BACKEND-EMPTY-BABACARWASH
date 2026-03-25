@@ -9,6 +9,7 @@ const schema = new mongoose.Schema(
     number: { type: String, required: true, unique: true },
     password: { type: String, select: false },
     hPassword: { type: String, select: false },
+    passwordChangedAt: { type: Date, default: Date.now },
 
     role: {
       type: String,

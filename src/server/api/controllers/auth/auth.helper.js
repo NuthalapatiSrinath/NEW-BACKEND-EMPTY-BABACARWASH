@@ -31,6 +31,10 @@ helper.verifyToken = (data) => {
     return jsonwebtoken.verify(data, config.keys.secret)
 }
 
+helper.getPasswordVersion = (passwordChangedAt) => {
+    return passwordChangedAt ? new Date(passwordChangedAt).getTime() : 0
+}
+
 helper.authenticate = async (req, res, next) => {
     try {
 
@@ -38,7 +42,19 @@ helper.authenticate = async (req, res, next) => {
         const data = jsonwebtoken.verify(headers.authorization, config.keys.secret)
 
         if (data) {
-            req.user = await UserModel.findOne({ _id: data._id }).lean()
+            const user = await UserModel.findOne({ _id: data._id }).lean()
+            if (!user) {
+                return res.status(401).json({ status: false, message: 'Not authorized' })
+            }
+
+            const tokenPasswordVersion = helper.getPasswordVersion(data.pwdChangedAt)
+            const userPasswordVersion = helper.getPasswordVersion(user.passwordChangedAt)
+
+            if (tokenPasswordVersion !== userPasswordVersion) {
+                return res.status(401).json({ status: false, message: 'Not authorized' })
+            }
+
+            req.user = user
             return next()
         }
 

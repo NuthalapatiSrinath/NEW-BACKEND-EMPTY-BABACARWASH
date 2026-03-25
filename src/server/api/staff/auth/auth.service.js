@@ -28,6 +28,7 @@ service.signin = async (payload) => {
         malls: 1,
         mobile: 1,
         service_type: 1,
+        passwordChangedAt: 1,
       },
     )
       .populate("buildings malls")
@@ -53,7 +54,10 @@ service.signin = async (payload) => {
 
     console.log("✅ [AUTH] Login successful for:", userData.name);
 
-    const token = AuthHelper.createToken({ _id: userData._id });
+    const token = AuthHelper.createToken({
+      _id: userData._id,
+      pwdChangedAt: AuthHelper.getPasswordVersion(userData.passwordChangedAt),
+    });
     delete userData.hPassword;
 
     return { token, ...userData };

@@ -172,6 +172,7 @@ service.create = async (userInfo, payload) => {
     hPassword: payload.password
       ? AuthHelper.getPasswordHash(payload.password)
       : undefined,
+    passwordChangedAt: payload.password ? new Date() : undefined,
   };
   const worker = await new WorkersModel(data).save();
 
@@ -208,6 +209,7 @@ service.update = async (userInfo, id, payload) => {
       ? {
           password: password,
           hPassword: AuthHelper.getPasswordHash(password),
+          passwordChangedAt: new Date(),
         }
       : {}),
   };

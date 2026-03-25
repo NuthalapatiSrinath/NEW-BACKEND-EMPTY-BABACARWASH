@@ -381,7 +381,10 @@ service.verifyOTP = async (mobile, otp) => {
     }
 
     // Generate auth token
-    const token = AuthHelper.createToken({ _id: customer._id });
+    const token = AuthHelper.createToken({
+      _id: customer._id,
+      pwdChangedAt: AuthHelper.getPasswordVersion(customer.passwordChangedAt),
+    });
 
     const customerData = toSafeCustomerObject(customer);
 
@@ -423,7 +426,10 @@ service.loginWithPassword = async (mobile, password) => {
     }
 
     // Generate auth token
-    const token = AuthHelper.createToken({ _id: customer._id });
+    const token = AuthHelper.createToken({
+      _id: customer._id,
+      pwdChangedAt: AuthHelper.getPasswordVersion(customer.passwordChangedAt),
+    });
 
     const customerData = toSafeCustomerObject(customer);
 

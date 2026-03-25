@@ -50,6 +50,7 @@ const schema = new mongoose.Schema(
     isDeleted: { type: Boolean, default: false },
     password: { type: String },
     hPassword: { type: String },
+    passwordChangedAt: { type: Date, default: Date.now },
   },
   {
     versionKey: false,

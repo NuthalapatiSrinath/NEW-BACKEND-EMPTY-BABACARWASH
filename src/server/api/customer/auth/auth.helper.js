@@ -31,6 +31,10 @@ helper.verifyToken = (data) => {
   return jsonwebtoken.verify(data, config.keys.secret);
 };
 
+helper.getPasswordVersion = (passwordChangedAt) => {
+  return passwordChangedAt ? new Date(passwordChangedAt).getTime() : 0;
+};
+
 helper.authenticate = async (req, res, next) => {
   try {
     const { headers } = req;
@@ -44,6 +48,15 @@ helper.authenticate = async (req, res, next) => {
         return res
           .status(401)
           .json({ statusCode: 401, message: "UNAUTHORIZED" });
+      }
+
+      const tokenPasswordVersion = helper.getPasswordVersion(data.pwdChangedAt);
+      const userPasswordVersion = helper.getPasswordVersion(
+        user.passwordChangedAt,
+      );
+
+      if (tokenPasswordVersion !== userPasswordVersion) {
+        return res.status(401).json({ statusCode: 401, message: "UNAUTHORIZED" });
       }
 
       // Check if customer is deleted

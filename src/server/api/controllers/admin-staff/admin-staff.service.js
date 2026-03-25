@@ -131,6 +131,7 @@ service.update = async (id, payload) => {
     const hash = AuthHelper.getPasswordHash(payload.password);
     updateData.password = payload.password;
     updateData.hPassword = hash;
+    updateData.passwordChangedAt = new Date();
   }
   if (typeof payload.isBlocked === "boolean") {
     updateData.isBlocked = payload.isBlocked;

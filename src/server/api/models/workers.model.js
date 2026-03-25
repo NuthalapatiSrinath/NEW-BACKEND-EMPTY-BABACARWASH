@@ -10,6 +10,7 @@ const schema = new mongoose.Schema(
     mobile: { type: String, required: true },
     password: { type: String }, // For app login
     hPassword: { type: String }, // Security hash
+    passwordChangedAt: { type: Date, default: Date.now },
     // ✅ ASSIGNMENT LOGIC (Updated)
     buildings: [{ type: mongoose.Schema.Types.ObjectId, ref: "buildings" }],
     malls: [{ type: mongoose.Schema.Types.ObjectId, ref: "malls" }],

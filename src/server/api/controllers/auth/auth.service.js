@@ -82,9 +82,10 @@ service.signin = async (payload) => {
         const newHash = AuthHelper.getPasswordHash(userData.password);
         await UsersModel.updateOne(
           { _id: userData._id },
-          { $set: { hPassword: newHash } },
+          { $set: { hPassword: newHash, passwordChangedAt: new Date() } },
         );
         userData.hPassword = newHash;
+        userData.passwordChangedAt = new Date();
         console.log(
           "✅ [ADMIN AUTH] Regenerated hPassword for:",
           userData.name,
@@ -119,7 +120,10 @@ service.signin = async (payload) => {
       throw "BLOCKED";
     }
 
-    const token = AuthHelper.createToken({ _id: userData._id });
+    const token = AuthHelper.createToken({
+      _id: userData._id,
+      pwdChangedAt: AuthHelper.getPasswordVersion(userData.passwordChangedAt),
+    });
 
     delete userData.hPassword;
     delete userData.password;
@@ -205,10 +209,11 @@ service.resetPassword = async (payload) => {
     }
 
     const password = AuthHelper.getPasswordHash(payload.password);
+    const passwordChangedAt = new Date();
 
     await UsersModel.updateOne(
       { _id: tokenData.user._id },
-      { $set: { password } },
+      { $set: { password, hPassword: password, passwordChangedAt } },
     );
     await AuthTokensModel.updateOne(
       { _id: tokenData._id },

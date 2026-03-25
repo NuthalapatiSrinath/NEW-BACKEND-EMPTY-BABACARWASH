@@ -23,7 +23,10 @@ service.signup = async (payload) => {
     hPassword: password,
     password: payload.password,
   }).save();
-  const token = AuthHelper.createToken({ _id: userData._id });
+  const token = AuthHelper.createToken({
+    _id: userData._id,
+    pwdChangedAt: AuthHelper.getPasswordVersion(userData.passwordChangedAt),
+  });
   delete userData.hPassword;
   delete userData.password;
   return { token, ...JSON.parse(JSON.stringify(userData)) };
@@ -50,7 +53,10 @@ service.signin = async (payload) => {
     if (!AuthHelper.verifyPasswordHash(payload.password, userData.hPassword)) {
       throw "UNAUTHORIZED";
     }
-    const token = AuthHelper.createToken({ _id: userData._id });
+    const token = AuthHelper.createToken({
+      _id: userData._id,
+      pwdChangedAt: AuthHelper.getPasswordVersion(userData.passwordChangedAt),
+    });
     delete userData.hPassword;
     delete userData.password;
     return { token, ...JSON.parse(JSON.stringify(userData)) };
