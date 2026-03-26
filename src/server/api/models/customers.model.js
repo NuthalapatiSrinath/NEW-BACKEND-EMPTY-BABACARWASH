@@ -2,6 +2,18 @@
 
 const mongoose = require("mongoose");
 
+const statusHistorySchema = new mongoose.Schema(
+  {
+    event: { type: String },
+    fromStatus: { type: Number },
+    toStatus: { type: Number },
+    reason: { type: String },
+    changedAt: { type: Date, default: Date.now },
+    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "users" },
+  },
+  { _id: false },
+);
+
 const vehicleSchema = new mongoose.Schema(
   {
     registration_no: { type: String },
@@ -17,6 +29,7 @@ const vehicleSchema = new mongoose.Schema(
     deactivateReason: { type: String },
     deactivateDate: { type: Date },
     reactivateDate: { type: Date },
+    statusHistory: { type: [statusHistorySchema], default: [] },
     vehicle_type: { type: String },
     brandId: { type: mongoose.Schema.Types.ObjectId, ref: "vehicle_brands" },
     brandName: { type: String },
@@ -44,6 +57,7 @@ const schema = new mongoose.Schema(
     deactivateReason: { type: String },
     deactivateDate: { type: Date },
     reactivateDate: { type: Date },
+    statusHistory: { type: [statusHistorySchema], default: [] },
     createdBy: { type: String, ref: "users" },
     updatedBy: { type: String },
     deletedBy: { type: String },

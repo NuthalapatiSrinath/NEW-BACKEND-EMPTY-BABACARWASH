@@ -327,6 +327,19 @@ controller.deactivate = async (req, res) => {
   }
 };
 
+controller.activate = async (req, res) => {
+  try {
+    const { user, params, body } = req;
+    const data = await service.activate(user, params.id, body);
+    return res.status(200).json({ statusCode: 200, message: "success", data });
+  } catch (error) {
+    console.error("Customer Activate Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Internal server error", error: error.message });
+  }
+};
+
 controller.archive = async (req, res) => {
   try {
     const { user, params, body } = req;

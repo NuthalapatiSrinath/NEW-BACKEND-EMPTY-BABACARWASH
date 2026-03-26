@@ -210,6 +210,19 @@ service.exportData = async (userInfo, query) => {
     .populate("worker staff")
     .lean();
 
+  const selectedCompanyName = String(query.companyName || "").trim();
+  const normalizedCompanyName = selectedCompanyName.toLowerCase();
+  const filteredData = selectedCompanyName
+    ? data.filter((record) => {
+        const companyName = String(
+          record.worker?.companyName ||
+            record.staff?.companyName ||
+            "Unassigned Company",
+        ).trim();
+        return companyName.toLowerCase() === normalizedCompanyName;
+      })
+    : data;
+
   const workbook = new exceljs.Workbook();
   const worksheet = workbook.addWorksheet("Attendance Report");
 
@@ -250,7 +263,7 @@ service.exportData = async (userInfo, query) => {
   // Group attendance data by employee
   const employeeMap = new Map();
 
-  data.forEach((record) => {
+  filteredData.forEach((record) => {
     const empId =
       record.worker?._id?.toString() || record.staff?._id?.toString();
     const empName = record.worker?.name || record.staff?.name || "Unknown";
@@ -276,7 +289,10 @@ service.exportData = async (userInfo, query) => {
 
   // Header row with location and month-year
   const totalCols = 4 + dates.length + 4; // SL.NO, NAME, CODE, MOBILE + dates + ABSENTS, PRESENT, TOTAL, ATTENDANCE%
-  worksheet.addRow([`${locationName} ${monthYear}`]);
+  const companyHeading = selectedCompanyName
+    ? ` - ${selectedCompanyName.toUpperCase()}`
+    : "";
+  worksheet.addRow([`${locationName} ${monthYear}${companyHeading}`]);
   worksheet.mergeCells(1, 1, 1, totalCols);
   worksheet.getCell(1, 1).font = {
     bold: true,

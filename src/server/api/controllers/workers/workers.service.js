@@ -16,6 +16,21 @@ const InAppNotifications = require("../../../notifications/in-app.notifications"
 // ... keep existing imports (WorkersModel, OnewashModel, JobsModel, etc.)
 const service = module.exports;
 
+const buildStatusHistoryEntry = ({
+  event,
+  fromStatus,
+  toStatus,
+  reason,
+  changedBy,
+}) => ({
+  event,
+  fromStatus,
+  toStatus,
+  ...(reason ? { reason } : null),
+  changedBy,
+  changedAt: new Date(),
+});
+
 const escapeRegex = (value = "") =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -192,6 +207,43 @@ service.create = async (userInfo, payload) => {
 
 service.update = async (userInfo, id, payload) => {
   const { password, ...updateData } = payload;
+  const workerBeforeUpdate = await WorkersModel.findById(id)
+    .select("status")
+    .lean();
+
+  if (!workerBeforeUpdate) {
+    throw new Error("WORKER_NOT_FOUND");
+  }
+
+  const historyEntry = {
+    event: null,
+    fromStatus: Number(workerBeforeUpdate.status),
+    toStatus: Number(workerBeforeUpdate.status),
+    reason: null,
+  };
+
+  if (Number(updateData.status) === 2) {
+    const reason = String(updateData.deactivateReason || "").trim();
+    if (!reason) {
+      throw "DEACTIVATE_REASON_REQUIRED";
+    }
+    updateData.deactivateReason = reason;
+    updateData.deactivateDate =
+      updateData.deactivateDate || new Date().toISOString();
+    historyEntry.event = "deactivated";
+    historyEntry.toStatus = 2;
+    historyEntry.reason = reason;
+  }
+
+  if (Number(updateData.status) === 1) {
+    updateData.reactivateDate =
+      updateData.reactivateDate || new Date().toISOString();
+    if (updateData.deactivateReason === undefined) {
+      updateData.deactivateReason = "";
+    }
+    historyEntry.event = "reactivated";
+    historyEntry.toStatus = 1;
+  }
 
   // Remove employeeCode if it's empty to avoid duplicate key error
   if (
@@ -213,7 +265,21 @@ service.update = async (userInfo, id, payload) => {
         }
       : {}),
   };
-  await WorkersModel.updateOne({ _id: id }, { $set: data });
+  const updateOperation = { $set: data };
+
+  if (historyEntry.event && historyEntry.fromStatus !== historyEntry.toStatus) {
+    updateOperation.$push = {
+      statusHistory: buildStatusHistoryEntry({
+        event: historyEntry.event,
+        fromStatus: historyEntry.fromStatus,
+        toStatus: historyEntry.toStatus,
+        reason: historyEntry.reason,
+        changedBy: userInfo._id,
+      }),
+    };
+  }
+
+  await WorkersModel.updateOne({ _id: id }, updateOperation);
 
   // Send notification about worker update
   try {
@@ -272,6 +338,13 @@ service.undoDelete = async (userInfo, id) => {
 };
 
 service.deactivate = async (userInfo, id, payload) => {
+  const worker = await WorkersModel.findById(id).select("status").lean();
+  if (!worker) {
+    throw new Error("WORKER_NOT_FOUND");
+  }
+
+  const reason = String(payload.deactivateReason || "").trim() || null;
+
   await CustomersModel.updateMany(
     { "vehicles.worker": id },
     { $set: { "vehicles.$.worker": payload.worker } },
@@ -282,11 +355,24 @@ service.deactivate = async (userInfo, id, payload) => {
   );
   const updateData = {
     status: 2,
-    deactivateReason: payload.deactivateReason,
+    deactivateReason: reason,
     ...(payload.otherReason ? { otherReason: payload.otherReason } : null),
     transferredTo: payload.worker,
   };
-  await WorkersModel.updateOne({ _id: id }, { $set: updateData });
+  const updateOperation = { $set: updateData };
+  if (Number(worker.status) !== 2) {
+    updateOperation.$push = {
+      statusHistory: buildStatusHistoryEntry({
+        event: "deactivated",
+        fromStatus: Number(worker.status || 1),
+        toStatus: 2,
+        reason,
+        changedBy: userInfo._id,
+      }),
+    };
+  }
+
+  await WorkersModel.updateOne({ _id: id }, updateOperation);
 };
 
 service.customersList = async (userInfo, query, workerId) => {
@@ -436,7 +522,15 @@ service.washesList = async (userInfo, query, workerId) => {
     });
   }
 
-  return { total: total + onewashTotal, data: [...data, ...onewashData] };
+  const workerInfo = await WorkersModel.findById(workerId)
+    .select("name mobile statusHistory")
+    .lean();
+
+  return {
+    total: total + onewashTotal,
+    data: [...data, ...onewashData],
+    workerInfo,
+  };
 };
 
 // ==========================================

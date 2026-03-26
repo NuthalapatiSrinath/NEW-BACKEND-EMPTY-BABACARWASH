@@ -2,6 +2,18 @@
 
 const mongoose = require("mongoose");
 
+const statusHistorySchema = new mongoose.Schema(
+  {
+    event: { type: String },
+    fromStatus: { type: Number },
+    toStatus: { type: Number },
+    reason: { type: String },
+    changedAt: { type: Date, default: Date.now },
+    changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "users" },
+  },
+  { _id: false },
+);
+
 const schema = new mongoose.Schema(
   {
     // --- 🟢 EXISTING WORKER FIELDS (Unchanged) ---
@@ -91,6 +103,7 @@ const schema = new mongoose.Schema(
 
     // Deactivation History
     deactivateReason: { type: String },
+    statusHistory: { type: [statusHistorySchema], default: [] },
     otherReason: { type: String },
     transferredTo: { type: mongoose.Schema.Types.ObjectId, ref: "workers" },
   },

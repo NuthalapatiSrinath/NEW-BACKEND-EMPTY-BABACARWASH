@@ -13,6 +13,26 @@ const JobsModel = require("../../models/jobs.model");
 const moment = require("moment");
 const service = module.exports;
 
+const buildStatusHistoryEntry = ({
+  event,
+  fromStatus,
+  toStatus,
+  reason,
+  changedBy,
+}) => ({
+  event,
+  fromStatus,
+  toStatus,
+  ...(reason ? { reason } : null),
+  changedBy,
+  changedAt: new Date(),
+});
+
+const normalizeReason = (value) => {
+  const reason = String(value || "").trim();
+  return reason || null;
+};
+
 // ---------------------------------------------------------
 // STANDARD CRUD
 // ---------------------------------------------------------
@@ -733,6 +753,13 @@ service.vehicleDeactivate = async (userInfo, id, payload) => {
     throw new Error("VEHICLE_NOT_FOUND");
   }
 
+  const vehicle = (customer.vehicles || []).find(
+    (item) => item._id.toString() === id.toString(),
+  );
+  const fromStatus = Number(vehicle?.status || 1);
+  const toStatus = 2;
+  const reason = normalizeReason(payload.deactivateReason);
+
   // Check for pending dues on this vehicle
   const duesCheck = await service.checkVehiclePendingDues(customer._id, id);
 
@@ -747,44 +774,85 @@ service.vehicleDeactivate = async (userInfo, id, payload) => {
     throw error;
   }
 
-  await CustomersModel.updateOne(
-    { "vehicles._id": id },
-    {
-      $set: {
-        "vehicles.$.status": 2,
-        "vehicles.$.deactivateReason": payload.deactivateReason || null,
-        "vehicles.$.deactivateDate": payload.deactivateDate || new Date(),
-        "vehicles.$.reactivateDate": payload.reactivateDate || null,
-        "vehicles.$.deactivatedBy": userInfo._id,
-      },
+  const updateOperation = {
+    $set: {
+      "vehicles.$.status": 2,
+      "vehicles.$.deactivateReason": reason,
+      "vehicles.$.deactivateDate": payload.deactivateDate || new Date(),
+      "vehicles.$.reactivateDate": payload.reactivateDate || null,
+      "vehicles.$.deactivatedBy": userInfo._id,
     },
-  );
+  };
+
+  if (fromStatus !== toStatus) {
+    updateOperation.$push = {
+      "vehicles.$.statusHistory": buildStatusHistoryEntry({
+        event: "deactivated",
+        fromStatus,
+        toStatus,
+        reason,
+        changedBy: userInfo._id,
+      }),
+    };
+  }
+
+  await CustomersModel.updateOne({ "vehicles._id": id }, updateOperation);
 
   return { message: "Vehicle deactivated successfully" };
 };
 
 service.vehicleActivate = async (userInfo, id, payload) => {
-  // Only update start_date on activation, onboard_date remains unchanged
-  await CustomersModel.updateOne(
-    { "vehicles._id": id },
-    {
-      $set: {
-        "vehicles.$.status": 1,
-        "vehicles.$.start_date": payload.start_date || new Date(),
-        "vehicles.$.restart_date":
-          payload.restart_date || payload.start_date || new Date(),
-        "vehicles.$.activatedBy": userInfo._id,
-      },
-      $unset: {
-        "vehicles.$.deactivateReason": "",
-        "vehicles.$.deactivateDate": "",
-        "vehicles.$.reactivateDate": "",
-      },
-    },
+  const customer = await CustomersModel.findOne({ "vehicles._id": id }).lean();
+  if (!customer) {
+    throw new Error("VEHICLE_NOT_FOUND");
+  }
+
+  const vehicle = (customer.vehicles || []).find(
+    (item) => item._id.toString() === id.toString(),
   );
+  const fromStatus = Number(vehicle?.status || 2);
+  const toStatus = 1;
+
+  // Only update start_date on activation, onboard_date remains unchanged
+  const updateOperation = {
+    $set: {
+      "vehicles.$.status": 1,
+      "vehicles.$.start_date": payload.start_date || new Date(),
+      "vehicles.$.restart_date":
+        payload.restart_date || payload.start_date || new Date(),
+      "vehicles.$.activatedBy": userInfo._id,
+    },
+    $unset: {
+      "vehicles.$.deactivateReason": "",
+      "vehicles.$.deactivateDate": "",
+      "vehicles.$.reactivateDate": "",
+    },
+  };
+
+  if (fromStatus !== toStatus) {
+    updateOperation.$push = {
+      "vehicles.$.statusHistory": buildStatusHistoryEntry({
+        event: "reactivated",
+        fromStatus,
+        toStatus,
+        changedBy: userInfo._id,
+      }),
+    };
+  }
+
+  await CustomersModel.updateOne({ "vehicles._id": id }, updateOperation);
 };
 
 service.deactivate = async (userInfo, id, payload) => {
+  const customer = await CustomersModel.findById(id).select("status").lean();
+  if (!customer) {
+    throw new Error("CUSTOMER_NOT_FOUND");
+  }
+
+  const fromStatus = Number(customer.status || 1);
+  const toStatus = 2;
+  const reason = normalizeReason(payload.deactivateReason);
+
   // Check for pending dues before deactivating customer
   const duesCheck = await service.checkPendingDues(id);
 
@@ -799,20 +867,65 @@ service.deactivate = async (userInfo, id, payload) => {
     throw error;
   }
 
-  await CustomersModel.updateOne(
-    { _id: id },
-    {
-      $set: {
-        status: 2,
-        deactivateReason: payload.deactivateReason || null,
-        deactivateDate: payload.deactivateDate || new Date(),
-        reactivateDate: payload.reactivateDate || null,
-        deactivatedBy: userInfo._id,
-      },
+  const updateOperation = {
+    $set: {
+      status: 2,
+      deactivateReason: reason,
+      deactivateDate: payload.deactivateDate || new Date(),
+      reactivateDate: payload.reactivateDate || null,
+      deactivatedBy: userInfo._id,
     },
-  );
+  };
+
+  if (fromStatus !== toStatus) {
+    updateOperation.$push = {
+      statusHistory: buildStatusHistoryEntry({
+        event: "deactivated",
+        fromStatus,
+        toStatus,
+        reason,
+        changedBy: userInfo._id,
+      }),
+    };
+  }
+
+  await CustomersModel.updateOne({ _id: id }, updateOperation);
 
   return { message: "Customer deactivated successfully" };
+};
+
+service.activate = async (userInfo, id, payload) => {
+  const customer = await CustomersModel.findById(id).select("status").lean();
+  if (!customer) {
+    throw new Error("CUSTOMER_NOT_FOUND");
+  }
+
+  const fromStatus = Number(customer.status || 2);
+  const toStatus = 1;
+  const reactivateDate = payload?.restart_date || payload?.reactivateDate;
+
+  const updateOperation = {
+    $set: {
+      status: 1,
+      reactivateDate: reactivateDate || new Date(),
+      activatedBy: userInfo._id,
+    },
+  };
+
+  if (fromStatus !== toStatus) {
+    updateOperation.$push = {
+      statusHistory: buildStatusHistoryEntry({
+        event: "reactivated",
+        fromStatus,
+        toStatus,
+        changedBy: userInfo._id,
+      }),
+    };
+  }
+
+  await CustomersModel.updateOne({ _id: id }, updateOperation);
+
+  return { message: "Customer activated successfully" };
 };
 
 service.archive = async (userInfo, id, payload) => {
@@ -1242,8 +1355,19 @@ service.washesList = async (userInfo, query, customerId) => {
 
   // Get customer info for header
   const customerInfo = await CustomersModel.findById(customerId)
-    .select("name mobile email")
+    .select(
+      "name firstName lastName mobile email statusHistory vehicles.registration_no vehicles.parking_no vehicles.statusHistory",
+    )
     .lean();
+
+  if (customerInfo?.vehicles) {
+    customerInfo.vehicles = customerInfo.vehicles.map((vehicle) => ({
+      _id: vehicle._id,
+      registration_no: vehicle.registration_no,
+      parking_no: vehicle.parking_no,
+      statusHistory: vehicle.statusHistory || [],
+    }));
+  }
 
   return { total, data, customerInfo };
 };

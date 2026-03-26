@@ -75,6 +75,7 @@ router.put(
 
 // Status Management
 router.put("/:id/deactivate", AuthHelper.authenticate, controller.deactivate);
+router.put("/:id/activate", AuthHelper.authenticate, controller.activate);
 router.put("/:id/archive", AuthHelper.authenticate, controller.archive);
 
 // Vehicle Specific Actions

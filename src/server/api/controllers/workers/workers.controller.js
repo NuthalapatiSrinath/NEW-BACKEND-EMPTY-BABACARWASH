@@ -67,6 +67,12 @@ controller.update = async (req, res) => {
     const data = await service.update(user, params.id, body);
     return res.status(200).json({ statusCode: 200, message: "success", data });
   } catch (error) {
+    if (error === "DEACTIVATE_REASON_REQUIRED") {
+      return res.status(400).json({
+        statusCode: 400,
+        message: "Deactivation reason is required",
+      });
+    }
     console.error(error);
     return res.status(500).json({ message: "Internal server error", error });
   }
