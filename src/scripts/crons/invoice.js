@@ -281,12 +281,17 @@ cron.run = async (
           continue;
         }
 
-        // Get last invoice to determine balance
+        // Get last valid subscription invoice before this invoice date.
+        // This avoids pulling soft-deleted rows or future-month invoices when
+        // months are generated manually out of chronological order.
         let lastInvoice = await PaymentsModel.findOne({
           customer: iterator._id,
           "vehicle._id": vehicle._id,
+          onewash: false,
+          isDeleted: { $ne: true },
+          createdAt: { $lt: invoiceDate.toDate() },
         })
-          .sort({ _id: -1 })
+          .sort({ createdAt: -1, _id: -1 })
           .lean();
 
         let balance = 0;

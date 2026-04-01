@@ -41,11 +41,14 @@ service.list = async (userInfo, query) => {
   const paginationData = CommonHelper.paginationData(query);
   const search = query.search ? query.search.trim() : "";
 
-  // Base Query - Filter by CUSTOMER status only, not vehicle status
+  // Base Query - filter by customer-level status.
   const findQuery = {
     isDeleted: false,
     status: Number(query.status) || 1, // Filter by CUSTOMER status (1=active, 2=inactive)
   };
+
+  // Vehicle-level filters are combined inside one $elemMatch when present.
+  const vehicleElemMatch = {};
 
   console.log(
     "🔍 [CUSTOMER LIST] Filtering by customer status:",
@@ -72,17 +75,12 @@ service.list = async (userInfo, query) => {
 
     // Match either string or ObjectId representation
     if (workerObjectId) {
-      findQuery.vehicles = {
-        $elemMatch: {
-          $or: [{ worker: workerObjectId }, { worker: workerString }],
-        },
-      };
+      vehicleElemMatch.$or = [
+        { worker: workerObjectId },
+        { worker: workerString },
+      ];
     } else {
-      findQuery.vehicles = {
-        $elemMatch: {
-          worker: workerString,
-        },
-      };
+      vehicleElemMatch.worker = workerString;
     }
     console.log(
       "👷 [CUSTOMER LIST] Filtering by specific worker:",
@@ -94,6 +92,37 @@ service.list = async (userInfo, query) => {
     );
   } else if (query.worker === "__ANY_WORKER__") {
     console.log("👷 [CUSTOMER LIST] Showing ALL customers (no worker filter)");
+  }
+
+  const rawVehicleStatus = query.vehicleStatus;
+  let parsedVehicleStatus = null;
+
+  if (rawVehicleStatus === "active") {
+    parsedVehicleStatus = 1;
+  } else if (rawVehicleStatus === "inactive") {
+    parsedVehicleStatus = 2;
+  } else if (
+    rawVehicleStatus !== undefined &&
+    rawVehicleStatus !== null &&
+    rawVehicleStatus !== "" &&
+    rawVehicleStatus !== "all"
+  ) {
+    const statusNumber = Number(rawVehicleStatus);
+    if (statusNumber === 1 || statusNumber === 2) {
+      parsedVehicleStatus = statusNumber;
+    }
+  }
+
+  if (parsedVehicleStatus !== null) {
+    vehicleElemMatch.status = parsedVehicleStatus;
+    console.log(
+      "🚗 [CUSTOMER LIST] Filtering by vehicle status:",
+      parsedVehicleStatus,
+    );
+  }
+
+  if (Object.keys(vehicleElemMatch).length > 0) {
+    findQuery.vehicles = { $elemMatch: vehicleElemMatch };
   }
 
   if (search) {

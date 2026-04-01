@@ -5,30 +5,40 @@ const { hasAccess } = require("../../middleware/permissions.middleware");
 
 const MODULE = "washes";
 
+const allowSupervisorOrAccess = (actionType) => {
+  const permissionGuard = hasAccess(MODULE, actionType);
+  return (req, res, next) => {
+    if (req.user?.role === "supervisor") {
+      return next();
+    }
+    return permissionGuard(req, res, next);
+  };
+};
+
 // ✅ Static/Specific Routes FIRST
 router.get(
   "/",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "view"),
+  allowSupervisorOrAccess("view"),
   controller.list,
 );
 router.post(
   "/",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "create"),
+  allowSupervisorOrAccess("create"),
   controller.create,
 );
 
 router.get(
   "/export/list",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "view"),
+  allowSupervisorOrAccess("view"),
   controller.exportData,
 );
 router.get(
   "/export/statement/monthly",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "view"),
+  allowSupervisorOrAccess("view"),
   controller.monthlyStatement,
 );
 router.post(
@@ -43,25 +53,25 @@ router.post(
 router.delete(
   "/:id/undo",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "delete"),
+  allowSupervisorOrAccess("delete"),
   controller.undoDelete,
 ); // Specific sub-resource
 router.get(
   "/:id",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "view"),
+  allowSupervisorOrAccess("view"),
   controller.info,
 );
 router.put(
   "/:id",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "edit"),
+  allowSupervisorOrAccess("edit"),
   controller.update,
 );
 router.delete(
   "/:id",
   AuthHelper.authenticate,
-  hasAccess(MODULE, "delete"),
+  allowSupervisorOrAccess("delete"),
   controller.delete,
 );
 

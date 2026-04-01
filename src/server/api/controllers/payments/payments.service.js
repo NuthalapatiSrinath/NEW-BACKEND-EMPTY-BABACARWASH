@@ -2160,7 +2160,12 @@ service.generatePDF = async (userInfo, filters) => {
         { key: "vehicle", label: "Vehicle", width: 52, align: "left" },
         { key: "parking", label: "Parking", width: 46, align: "left" },
         { key: "billDate", label: "Bill Date", width: 54, align: "left" },
-        { key: "subscription", label: "Subscription", width: 50, align: "right" },
+        {
+          key: "subscription",
+          label: "Subscription",
+          width: 50,
+          align: "right",
+        },
         { key: "previousDue", label: "Previous", width: 50, align: "right" },
         { key: "totalDue", label: "Total Due", width: 52, align: "right" },
         { key: "paid", label: "Paid", width: 44, align: "right" },
@@ -2218,10 +2223,18 @@ service.generatePDF = async (userInfo, filters) => {
         doc.fontSize(10).font("Helvetica").fillColor("#374151");
         doc.text(`Date Range: ${startDate} to ${endDate}`, left, y);
         doc.text(`Total Records: ${payments.length}`, left, y + 14);
-        doc.text(`Total Revenue: ${formatMoney(totals.totalDue)}`, left, y + 28);
+        doc.text(
+          `Total Revenue: ${formatMoney(totals.totalDue)}`,
+          left,
+          y + 28,
+        );
 
         if (isFirstPage) {
-          doc.text(`Collected: ${formatMoney(totals.totalPaid)}`, left + 260, y + 14);
+          doc.text(
+            `Collected: ${formatMoney(totals.totalPaid)}`,
+            left + 260,
+            y + 14,
+          );
           doc.text(`Cash: ${formatMoney(totals.cash)}`, left + 260, y + 28);
           doc.text(`Card: ${formatMoney(totals.card)}`, left + 390, y + 28);
           doc.text(`Bank: ${formatMoney(totals.bank)}`, left + 510, y + 28);
@@ -2289,7 +2302,9 @@ service.generatePDF = async (userInfo, filters) => {
         }
 
         if (index % 2 === 0) {
-          doc.rect(left, y, doc.page.width - left * 2, rowHeight).fill("#f9fafb");
+          doc
+            .rect(left, y, doc.page.width - left * 2, rowHeight)
+            .fill("#f9fafb");
         }
 
         doc.font("Helvetica").fontSize(7).fillColor("#1f2937");
@@ -2393,6 +2408,111 @@ service.getPaymentHistory = async (userInfo, paymentId) => {
   // Get amount edit history
   const amountEdits = payment.amount_edit_history || [];
 
+  const getBillingMonthKey = (item) => {
+    if (item?.billing_month) return item.billing_month;
+    // Legacy fallback: invoice date is first day of next month.
+    return moment(item?.createdAt).subtract(1, "day").format("YYYY-MM");
+  };
+
+  const sameVehicleQuery = payment?.vehicle?._id
+    ? { "vehicle._id": payment.vehicle._id }
+    : payment?.vehicle?.registration_no
+      ? {
+          "vehicle.registration_no": payment.vehicle.registration_no,
+          ...(payment?.vehicle?.parking_no
+            ? { "vehicle.parking_no": payment.vehicle.parking_no }
+            : null),
+        }
+      : null;
+
+  const historyQuery = {
+    customer: payment.customer,
+    onewash: false,
+    isDeleted: { $ne: true },
+    ...(sameVehicleQuery || null),
+  };
+
+  const relatedBills = await PaymentsModel.find(historyQuery)
+    .sort({ createdAt: 1, _id: 1 })
+    .select({
+      _id: 1,
+      createdAt: 1,
+      collectedDate: 1,
+      billing_month: 1,
+      amount_charged: 1,
+      old_balance: 1,
+      total_amount: 1,
+      amount_paid: 1,
+      balance: 1,
+      status: 1,
+      settled: 1,
+      receipt_no: 1,
+      notes: 1,
+    })
+    .lean();
+
+  const monthlyBreakdown = relatedBills
+    .map((item) => {
+      const monthKey = getBillingMonthKey(item);
+      const monthlyAmount =
+        item.amount_charged !== undefined
+          ? Number(item.amount_charged || 0)
+          : Math.max(
+              0,
+              Number(item.total_amount || 0) - Number(item.old_balance || 0),
+            );
+
+      return {
+        paymentId: item._id,
+        monthKey,
+        monthLabel: moment(monthKey, "YYYY-MM").format("MMMM YYYY"),
+        invoiceDate: item.createdAt || null,
+        dueDate: moment(monthKey, "YYYY-MM").endOf("month").toDate(),
+        monthlyAmount,
+        carriedForward: Number(item.old_balance || 0),
+        totalAmount: Number(item.total_amount || 0),
+        paidAmount: Number(item.amount_paid || 0),
+        balance: Number(item.balance || 0),
+        status: item.status,
+        settled: item.settled,
+        receiptNo: item.receipt_no || null,
+        collectedDate: item.collectedDate || null,
+        notes: item.notes || null,
+      };
+    })
+    .sort((a, b) => b.monthKey.localeCompare(a.monthKey));
+
+  const currentMonthKey = getBillingMonthKey(payment);
+  const currentMonthLabel = moment(currentMonthKey, "YYYY-MM").format(
+    "MMMM YYYY",
+  );
+
+  const currentIndex = relatedBills.findIndex(
+    (item) => String(item._id) === String(payment._id),
+  );
+
+  const previousBill =
+    currentIndex > 0 && relatedBills[currentIndex - 1]
+      ? relatedBills[currentIndex - 1]
+      : null;
+
+  const carriedForwardSource =
+    Number(payment.old_balance || 0) > 0 && previousBill
+      ? {
+          fromPaymentId: previousBill._id,
+          fromMonthKey: getBillingMonthKey(previousBill),
+          fromMonthLabel: moment(
+            getBillingMonthKey(previousBill),
+            "YYYY-MM",
+          ).format("MMMM YYYY"),
+          fromBalance: Number(previousBill.balance || 0),
+          amountCarried: Number(payment.old_balance || 0),
+          toPaymentId: payment._id,
+          toMonthKey: currentMonthKey,
+          toMonthLabel: currentMonthLabel,
+        }
+      : null;
+
   // Get collection transactions
   const transactions = await TransactionsModel.find({
     payment: paymentId,
@@ -2415,7 +2535,27 @@ service.getPaymentHistory = async (userInfo, paymentId) => {
     currentAmount: payment.total_amount,
     currentBalance: payment.balance,
     currentStatus: payment.status,
+    currentPaidAmount: payment.amount_paid || 0,
+    currentMonthlyAmount:
+      payment.amount_charged !== undefined
+        ? Number(payment.amount_charged || 0)
+        : Math.max(
+            0,
+            Number(payment.total_amount || 0) -
+              Number(payment.old_balance || 0),
+          ),
+    currentOldBalance: payment.old_balance || 0,
+    currentBillingMonthKey: currentMonthKey,
+    currentBillingMonthLabel: currentMonthLabel,
+    currentInvoiceDate: payment.createdAt || null,
+    currentDueDate: moment(currentMonthKey, "YYYY-MM").endOf("month").toDate(),
+    vehicleInfo: {
+      registrationNo: payment?.vehicle?.registration_no || null,
+      parkingNo: payment?.vehicle?.parking_no || null,
+    },
     notes: payment.notes,
+    carriedForwardSource,
+    monthlyBreakdown,
     amountEdits: amountEdits,
     transactions: populatedTransactions,
   };
