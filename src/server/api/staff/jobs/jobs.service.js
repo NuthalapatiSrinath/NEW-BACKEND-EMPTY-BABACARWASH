@@ -9,8 +9,35 @@ const AuthHelper = require("../auth/auth.helper");
 const mongoose = require("mongoose");
 const service = module.exports;
 
-const isValidObjectId = (value) =>
-  typeof value === "string" && mongoose.Types.ObjectId.isValid(value);
+const normalizeObjectId = (value) => {
+  if (value == null) return null;
+
+  if (value instanceof mongoose.Types.ObjectId) {
+    return value.toString();
+  }
+
+  if (typeof value === "string" && mongoose.Types.ObjectId.isValid(value)) {
+    return value;
+  }
+
+  if (typeof value === "object") {
+    const nested = value._id ?? value.id;
+    if (
+      nested instanceof mongoose.Types.ObjectId ||
+      (typeof nested === "string" && mongoose.Types.ObjectId.isValid(nested))
+    ) {
+      return nested.toString();
+    }
+  }
+
+  return null;
+};
+
+const areSameId = (a, b) => {
+  const left = normalizeObjectId(a) || String(a ?? "");
+  const right = normalizeObjectId(b) || String(b ?? "");
+  return left && right && left === right;
+};
 
 const getMobileAddressText = (job) => {
   if (typeof job?.address === "string" && job.address.trim()) {
@@ -269,8 +296,11 @@ service.list = async (userInfo, query) => {
   const buildingIds = new Set();
 
   for (const item of data) {
-    if (isValidObjectId(item.location)) locationIds.add(item.location);
-    if (isValidObjectId(item.building)) buildingIds.add(item.building);
+    const locationId = normalizeObjectId(item.location);
+    const buildingId = normalizeObjectId(item.building);
+
+    if (locationId) locationIds.add(locationId);
+    if (buildingId) buildingIds.add(buildingId);
   }
 
   const [locations, buildingDocs] = await Promise.all([
@@ -298,8 +328,14 @@ service.list = async (userInfo, query) => {
   const buildingMap = new Map(buildingDocs.map((b) => [String(b._id), b]));
 
   for (const item of data) {
-    if (isValidObjectId(item.location)) {
-      item.location = locationMap.get(String(item.location)) || null;
+    const locationId = normalizeObjectId(item.location);
+    const buildingId = normalizeObjectId(item.building);
+
+    if (locationId) {
+      item.location = locationMap.get(locationId) || {
+        _id: locationId,
+        address: "Unknown Location",
+      };
     } else if (item.service_type === "mobile") {
       item.location = {
         _id: `mobile-location-${item._id}`,
@@ -312,8 +348,11 @@ service.list = async (userInfo, query) => {
           : null;
     }
 
-    if (isValidObjectId(item.building)) {
-      item.building = buildingMap.get(String(item.building)) || null;
+    if (buildingId) {
+      item.building = buildingMap.get(buildingId) || {
+        _id: buildingId,
+        name: "Unknown Building",
+      };
     } else if (item.service_type === "mobile") {
       item.building = {
         _id: `mobile-building-${item._id}`,
@@ -366,9 +405,15 @@ service.list = async (userInfo, query) => {
     if (!iterator.customer) {
       continue;
     }
-    iterator.vehicle = iterator.customer.vehicles.find(
-      (e) => e._id == iterator.vehicle,
-    );
+
+    const customerVehicles = Array.isArray(iterator.customer.vehicles)
+      ? iterator.customer.vehicles
+      : [];
+
+    iterator.vehicle =
+      customerVehicles.find((vehicle) => areSameId(vehicle?._id, iterator.vehicle)) ||
+      null;
+
     let key = ["mobile", "mall"].includes(iterator.service_type)
       ? iterator.service_type.toUpperCase()
       : `${iterator.location?._id || `loc-${iterator._id}`}-${iterator.building?._id || `bld-${iterator._id}`}`;
