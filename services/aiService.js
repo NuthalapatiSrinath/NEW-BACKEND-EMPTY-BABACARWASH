@@ -1,57 +1,23 @@
 import { AI_SYSTEM_PROMPT } from "./aiContext.js";
 
-const normalizeBaseUrl = (value) =>
-  String(value || "")
-    .trim()
-    .replace(/\/+$/, "");
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_URL =
+  String(process.env.GEMINI_URL || "").trim() ||
+  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`;
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 60000);
 
-const resolveOllamaUrl = () => {
-  const explicit = String(process.env.OLLAMA_URL || "").trim();
-  if (explicit) return explicit;
+const buildGeminiHeaders = () => ({
+  "Content-Type": "application/json",
+  "x-goog-api-key": GEMINI_API_KEY,
+});
 
-  const base = normalizeBaseUrl(
-    process.env.OLLAMA_BASE_URL || "http://localhost:11434",
-  );
-  return `${base}/api/chat`;
-};
-
-const OLLAMA_URL = resolveOllamaUrl();
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3";
-const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 120000);
-const OLLAMA_API_KEY = String(process.env.OLLAMA_API_KEY || "").trim();
-const OLLAMA_AUTH_HEADER =
-  String(process.env.OLLAMA_AUTH_HEADER || "Authorization").trim() ||
-  "Authorization";
-const OLLAMA_AUTH_SCHEME = String(
-  process.env.OLLAMA_AUTH_SCHEME || "Bearer",
-).trim();
-
-const buildHeaders = () => {
-  const headers = {
-    "Content-Type": "application/json",
-  };
-
-  if (!OLLAMA_API_KEY) {
-    return headers;
-  }
-
-  if (OLLAMA_AUTH_HEADER.toLowerCase() === "authorization") {
-    headers.Authorization = OLLAMA_AUTH_SCHEME
-      ? `${OLLAMA_AUTH_SCHEME} ${OLLAMA_API_KEY}`
-      : OLLAMA_API_KEY;
-
-    return headers;
-  }
-
-  headers[OLLAMA_AUTH_HEADER] = OLLAMA_API_KEY;
-  return headers;
-};
-
-const requestOllama = async ({
+const requestWithTimeout = async ({
   url,
   method = "GET",
   body,
-  timeoutMs = OLLAMA_TIMEOUT_MS,
+  headers,
+  timeoutMs,
 }) => {
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
@@ -59,7 +25,7 @@ const requestOllama = async ({
   try {
     return await fetch(url, {
       method,
-      headers: buildHeaders(),
+      headers,
       body,
       signal: controller.signal,
     });
@@ -68,55 +34,64 @@ const requestOllama = async ({
   }
 };
 
-const isModelMissingError = (statusCode, responseText = "") => {
-  const text = String(responseText || "").toLowerCase();
-
-  if (statusCode === 404 && text.includes("model")) {
-    return true;
-  }
-
-  return (
-    text.includes("model") &&
-    (text.includes("not found") ||
-      text.includes("not installed") ||
-      text.includes("pull"))
-  );
+const requestGemini = async ({
+  body,
+  timeoutMs = GEMINI_TIMEOUT_MS,
+  url = GEMINI_URL,
+}) => {
+  return requestWithTimeout({
+    url,
+    method: "POST",
+    body,
+    timeoutMs,
+    headers: buildGeminiHeaders(),
+  });
 };
 
-const buildRequestBody = (prompt) => {
-  const isChatApi = OLLAMA_URL.includes("/api/chat");
+const buildGeminiRequestBody = (prompt) => ({
+  systemInstruction: {
+    parts: [{ text: AI_SYSTEM_PROMPT.trim() }],
+  },
+  contents: [
+    {
+      role: "user",
+      parts: [{ text: prompt }],
+    },
+  ],
+  generationConfig: {
+    temperature: 0.1,
+  },
+});
 
-  if (isChatApi) {
-    return {
-      model: OLLAMA_MODEL,
-      stream: false,
-      options: {
-        temperature: 0.1,
-      },
-      messages: [
-        { role: "system", content: AI_SYSTEM_PROMPT.trim() },
-        { role: "user", content: prompt },
-      ],
-    };
+const extractGeminiReplyText = (payload) => {
+  const parts = payload?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) {
+    return "";
   }
 
-  return {
-    model: OLLAMA_MODEL,
-    prompt: `${AI_SYSTEM_PROMPT.trim()}\n\nUser Query: ${prompt}`,
-    stream: false,
-  };
+  return parts
+    .map((part) => (typeof part?.text === "string" ? part.text : ""))
+    .join("")
+    .trim();
 };
 
-const extractReplyText = (payload) => {
-  if (typeof payload?.message?.content === "string") {
-    return payload.message.content.trim();
-  }
+const formatProviderErrorBody = (text) => {
+  if (!text) return "";
 
-  if (typeof payload?.response === "string") {
-    return payload.response.trim();
+  try {
+    const parsed = JSON.parse(text);
+    return parsed?.error?.message || text;
+  } catch (_) {
+    return text;
   }
+};
 
-  return "";
+const assertGeminiConfiguration = () => {
+  if (!GEMINI_API_KEY) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured. Set GEMINI_API_KEY in backend env.",
+    );
+  }
 };
 
 export async function askAI(prompt) {
@@ -126,38 +101,33 @@ export async function askAI(prompt) {
 
   const normalizedPrompt = prompt.trim();
 
+  assertGeminiConfiguration();
+
   try {
-    const response = await requestOllama({
-      url: OLLAMA_URL,
-      method: "POST",
-      body: JSON.stringify(buildRequestBody(normalizedPrompt)),
+    const response = await requestGemini({
+      body: JSON.stringify(buildGeminiRequestBody(normalizedPrompt)),
     });
 
     if (!response.ok) {
-      const errorBody = await safeReadText(response);
-
-      if (isModelMissingError(response.status, errorBody)) {
-        throw new Error(
-          `Ollama model "${OLLAMA_MODEL}" is not installed. Pull it manually on the Ollama server: ollama pull ${OLLAMA_MODEL}`,
-        );
-      }
+      const rawErrorBody = await safeReadText(response);
+      const errorBody = formatProviderErrorBody(rawErrorBody);
 
       throw new Error(
-        `Ollama request failed with status ${response.status}${errorBody ? `: ${errorBody}` : ""}`,
+        `Gemini request failed with status ${response.status}${errorBody ? `: ${errorBody}` : ""}`,
       );
     }
 
     const data = await response.json();
-    const reply = extractReplyText(data);
+    const reply = extractGeminiReplyText(data);
 
     if (!reply) {
-      throw new Error("Ollama returned an empty response.");
+      throw new Error("Gemini returned an empty response.");
     }
 
     return reply;
   } catch (error) {
     if (error && error.name === "AbortError") {
-      throw new Error(`Ollama request timed out after ${OLLAMA_TIMEOUT_MS}ms.`);
+      throw new Error(`Gemini request timed out after ${GEMINI_TIMEOUT_MS}ms.`);
     }
 
     const causeCode = error?.cause?.code;
@@ -168,7 +138,7 @@ export async function askAI(prompt) {
       )
     ) {
       throw new Error(
-        `Unable to reach Ollama at ${OLLAMA_URL}. Verify backend env (OLLAMA_URL/OLLAMA_BASE_URL) and that the Coolify Ollama app is running.`,
+        "Unable to reach Gemini API. Verify internet access and GEMINI_API_KEY.",
       );
     }
 

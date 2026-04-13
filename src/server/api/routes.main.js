@@ -242,7 +242,7 @@ module.exports = (app) => {
       if (errorMessage.includes("timed out")) {
         return res.status(504).json({
           statusCode: 504,
-          message: "Local Ollama service timed out",
+          message: "AI provider request timed out",
         });
       }
 
@@ -253,7 +253,11 @@ module.exports = (app) => {
         });
       }
 
-      if (errorMessage.includes("Ollama request failed")) {
+      if (
+        errorMessage.includes("request failed") ||
+        errorMessage.includes("Unable to reach") ||
+        errorMessage.includes("GEMINI_API_KEY")
+      ) {
         return res.status(502).json({
           statusCode: 502,
           message: errorMessage,
@@ -262,7 +266,7 @@ module.exports = (app) => {
 
       return res.status(500).json({
         statusCode: 500,
-        message: "Failed to get response from local Ollama service",
+        message: "Failed to get response from AI provider",
       });
     }
   };
