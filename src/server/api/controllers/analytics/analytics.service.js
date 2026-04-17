@@ -69,466 +69,1660 @@ service.dashboardAll = async (userInfo, query) => {
     const lastMonthEnd = thisMonthStart;
     const last30Days = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
+    const chartDateRange = hasDateFilter
+      ? {
+          $gte: dateFilter.createdAt.$gte,
+          $lte: dateFilter.createdAt.$lte,
+        }
+      : { $gte: yearStart, $lt: yearEnd };
+
+    const revenueTrendDateRange = hasDateFilter
+      ? {
+          $gte: dateFilter.createdAt.$gte,
+          $lte: dateFilter.createdAt.$lte,
+        }
+      : { $gte: last30Days };
+
     // ⚡ Execute optimized parallel queries with sampling
-    const [jobsData, paymentsData, simpleCountsData] = await Promise.all([
-      // Jobs aggregation with $facet
-      JobsModel.aggregate([
-        { $match: { isDeleted: false } },
-        {
-          $facet: {
-            basicStats: [
-              { $match: hasDateFilter ? dateFilter : {} },
-              {
-                $group: {
-                  _id: null,
-                  total: { $sum: 1 },
-                  completed: {
-                    $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-                  },
-                  pending: {
-                    $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
-                  },
-                  cancelled: {
-                    $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] },
-                  },
-                  residence: {
-                    $sum: {
-                      $cond: [{ $eq: ["$service_type", "residence"] }, 1, 0],
-                    },
-                  },
-                  commercial: {
-                    $sum: {
-                      $cond: [{ $eq: ["$service_type", "commercial"] }, 1, 0],
-                    },
-                  },
-                  mall: {
-                    $sum: { $cond: [{ $eq: ["$service_type", "mall"] }, 1, 0] },
-                  },
-                  onewash: {
-                    $sum: {
-                      $cond: [{ $eq: ["$service_type", "onewash"] }, 1, 0],
-                    },
-                  },
-                },
-              },
-            ],
-            chartData: [
-              {
-                $match: {
-                  status: { $in: ["completed", "pending"] },
-                  createdAt: { $gte: yearStart, $lt: yearEnd },
-                },
-              },
-              {
-                $group: {
-                  _id: { month: { $month: "$createdAt" }, status: "$status" },
-                  count: { $sum: 1 },
-                },
-              },
-              { $sort: { "_id.month": 1 } },
-              { $limit: 24 },
-            ],
-            serviceDistribution: [
-              {
-                $match: {
-                  service_type: { $exists: true, $ne: null, $ne: "" },
-                  ...(hasDateFilter ? dateFilter : {}),
-                },
-              },
-              { $limit: 50000 },
-              {
-                $group: {
-                  _id: "$service_type",
-                  count: { $sum: 1 },
-                  completed: {
-                    $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-                  },
-                  pending: {
-                    $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
-                  },
-                  cancelled: {
-                    $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] },
-                  },
-                },
-              },
-              { $sort: { count: -1 } },
-            ],
-            topWorkers: [
-              {
-                $match: {
-                  status: "completed",
-                  worker: { $exists: true, $ne: null },
-                  ...(hasDateFilter ? dateFilter : {}),
-                },
-              },
-              { $limit: 100000 },
-              { $group: { _id: "$worker", totalJobs: { $sum: 1 } } },
-              { $sort: { totalJobs: -1 } },
-              { $limit: 10 },
-              {
-                $lookup: {
-                  from: "workers",
-                  localField: "_id",
-                  foreignField: "_id",
-                  as: "workerInfo",
-                },
-              },
-              {
-                $unwind: {
-                  path: "$workerInfo",
-                  preserveNullAndEmptyArrays: true,
-                },
-              },
-            ],
-            buildingAnalytics: [
-              {
-                $match: {
-                  customer: { $exists: true, $ne: null },
-                  ...(hasDateFilter ? dateFilter : {}),
-                },
-              },
-              { $limit: 50000 },
-              {
-                $lookup: {
-                  from: "customers",
-                  localField: "customer",
-                  foreignField: "_id",
-                  as: "customerInfo",
-                },
-              },
-              {
-                $unwind: {
-                  path: "$customerInfo",
-                  preserveNullAndEmptyArrays: true,
-                },
-              },
-              {
-                $group: {
-                  _id: "$customerInfo.building",
-                  totalJobs: { $sum: 1 },
-                  completedJobs: {
-                    $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-                  },
-                },
-              },
-              { $match: { _id: { $exists: true, $ne: null } } },
-              { $sort: { totalJobs: -1 } },
-              { $limit: 20 },
-              {
-                $lookup: {
-                  from: "buildings",
-                  localField: "_id",
-                  foreignField: "_id",
-                  as: "buildingInfo",
-                },
-              },
-              {
-                $unwind: {
-                  path: "$buildingInfo",
-                  preserveNullAndEmptyArrays: true,
-                },
-              },
-            ],
-            todayJobs: [
-              { $match: { createdAt: { $gte: todayStart } } },
-              { $count: "count" },
-            ],
-            yesterdayJobs: [
-              {
-                $match: {
-                  createdAt: { $gte: yesterdayStart, $lt: todayStart },
-                },
-              },
-              { $count: "count" },
-            ],
-            thisWeekJobs: [
-              { $match: { createdAt: { $gte: thisWeekStart } } },
-              { $count: "count" },
-            ],
-            lastWeekJobs: [
-              {
-                $match: {
-                  createdAt: { $gte: lastWeekStart, $lt: lastWeekEnd },
-                },
-              },
-              { $count: "count" },
-            ],
-            thisMonthJobs: [
-              { $match: { createdAt: { $gte: thisMonthStart } } },
-              { $count: "count" },
-            ],
-            lastMonthJobs: [
-              {
-                $match: {
-                  createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd },
-                },
-              },
-              { $count: "count" },
-            ],
-          },
-        },
-      ]),
-
-      // Payments aggregation with $facet
-      PaymentsModel.aggregate([
-        { $match: { isDeleted: false } },
-        {
-          $facet: {
-            paymentStats: [
-              { $match: hasDateFilter ? dateFilter : {} },
-              { $limit: 100000 },
-              {
-                $group: {
-                  _id: "$status",
-                  count: { $sum: 1 },
-                  totalAmount: { $sum: "$amount_charged" },
-                  paidAmount: { $sum: "$amount_paid" },
-                  balance: { $sum: "$balance" },
-                },
-              },
-            ],
-            residenceChartData: [
-              {
-                $match: {
-                  status: { $in: ["completed", "pending"] },
-                  createdAt: { $gte: yearStart, $lt: yearEnd },
-                  onewash: false,
-                },
-              },
-              {
-                $group: {
-                  _id: { month: { $month: "$createdAt" }, status: "$status" },
-                  count: { $sum: 1 },
-                },
-              },
-              { $sort: { "_id.month": 1 } },
-              { $limit: 24 },
-            ],
-            onewashChartData: [
-              {
-                $match: {
-                  status: { $in: ["completed", "pending"] },
-                  createdAt: { $gte: yearStart, $lt: yearEnd },
-                  onewash: true,
-                },
-              },
-              {
-                $group: {
-                  _id: { month: { $month: "$createdAt" }, status: "$status" },
-                  count: { $sum: 1 },
-                },
-              },
-              { $sort: { "_id.month": 1 } },
-              { $limit: 24 },
-            ],
-            revenueTrends: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: {
-                    $gte: hasDateFilter
-                      ? dateFilter.createdAt.$gte
-                      : last30Days,
-                  },
-                },
-              },
-              { $limit: 50000 },
-              {
-                $group: {
-                  _id: {
-                    date: {
-                      $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
-                    },
-                  },
-                  revenue: { $sum: "$amount_paid" },
-                  count: { $sum: 1 },
-                },
-              },
-              { $sort: { "_id.date": 1 } },
-              { $limit: 90 },
-            ],
-            topWorkersRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  worker: { $exists: true, $ne: null },
-                  ...(hasDateFilter ? dateFilter : {}),
-                },
-              },
-              { $limit: 100000 },
-              {
-                $group: {
-                  _id: "$worker",
-                  totalRevenue: { $sum: "$amount_paid" },
-                  totalJobs: { $sum: 1 },
-                },
-              },
-              { $sort: { totalRevenue: -1 } },
-              { $limit: 1 },
-            ],
-            serviceRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  job: { $exists: true, $ne: null },
-                  ...(hasDateFilter ? dateFilter : {}),
-                },
-              },
-              { $limit: 50000 },
-              {
-                $lookup: {
-                  from: "jobs",
-                  localField: "job",
-                  foreignField: "_id",
-                  as: "jobInfo",
-                },
-              },
-              {
-                $unwind: { path: "$jobInfo", preserveNullAndEmptyArrays: true },
-              },
-              {
-                $match: {
-                  "jobInfo.service_type": { $exists: true, $ne: null },
-                },
-              },
-              {
-                $group: {
-                  _id: "$jobInfo.service_type",
-                  revenue: { $sum: "$amount_paid" },
-                },
-              },
-            ],
-            todayRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: { $gte: todayStart },
-                },
-              },
-              { $group: { _id: null, total: { $sum: "$amount_paid" } } },
-            ],
-            yesterdayRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: { $gte: yesterdayStart, $lt: todayStart },
-                },
-              },
-              { $group: { _id: null, total: { $sum: "$amount_paid" } } },
-            ],
-            thisWeekRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: { $gte: thisWeekStart },
-                },
-              },
-              { $group: { _id: null, total: { $sum: "$amount_paid" } } },
-            ],
-            lastWeekRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: { $gte: lastWeekStart, $lt: lastWeekEnd },
-                },
-              },
-              { $group: { _id: null, total: { $sum: "$amount_paid" } } },
-            ],
-            thisMonthRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: { $gte: thisMonthStart },
-                },
-              },
-              { $group: { _id: null, total: { $sum: "$amount_paid" } } },
-            ],
-            lastMonthRevenue: [
-              {
-                $match: {
-                  status: "completed",
-                  createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd },
-                },
-              },
-              { $group: { _id: null, total: { $sum: "$amount_paid" } } },
-            ],
-          },
-        },
-      ]),
-
-      // Simple counts
-      Promise.all([
-        CustomersModel.aggregate([
+    const [jobsData, paymentsData, simpleCountsData, dailySnapshotData] =
+      await Promise.all([
+        // Jobs aggregation with $facet
+        JobsModel.aggregate([
           { $match: { isDeleted: false } },
           {
             $facet: {
-              counts: [
+              basicStats: [
+                { $match: hasDateFilter ? dateFilter : {} },
                 {
                   $group: {
                     _id: null,
                     total: { $sum: 1 },
-                    active: {
-                      $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] },
+                    completed: {
+                      $sum: {
+                        $cond: [{ $eq: ["$status", "completed"] }, 1, 0],
+                      },
                     },
-                    inactive: {
-                      $sum: { $cond: [{ $eq: ["$status", 0] }, 1, 0] },
+                    pending: {
+                      $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
+                    },
+                    cancelled: {
+                      $sum: {
+                        $cond: [
+                          { $in: ["$status", ["cancelled", "rejected"]] },
+                          1,
+                          0,
+                        ],
+                      },
+                    },
+                    residence: {
+                      $sum: {
+                        $cond: [{ $eq: ["$service_type", "residence"] }, 1, 0],
+                      },
+                    },
+                    commercial: {
+                      $sum: {
+                        $cond: [{ $eq: ["$service_type", "commercial"] }, 1, 0],
+                      },
+                    },
+                    mall: {
+                      $sum: {
+                        $cond: [{ $eq: ["$service_type", "mall"] }, 1, 0],
+                      },
+                    },
+                    onewash: {
+                      $sum: {
+                        $cond: [{ $eq: ["$service_type", "onewash"] }, 1, 0],
+                      },
                     },
                   },
                 },
               ],
-              vehicles: [
+              chartData: [
+                {
+                  $match: {
+                    status: { $in: ["completed", "pending"] },
+                    createdAt: chartDateRange,
+                  },
+                },
+                {
+                  $group: {
+                    _id: { month: { $month: "$createdAt" }, status: "$status" },
+                    count: { $sum: 1 },
+                  },
+                },
+                { $sort: { "_id.month": 1 } },
+                { $limit: 24 },
+              ],
+              serviceDistribution: [
+                {
+                  $match: {
+                    service_type: { $exists: true, $ne: null, $ne: "" },
+                    ...(hasDateFilter ? dateFilter : {}),
+                  },
+                },
+                { $limit: 50000 },
+                {
+                  $group: {
+                    _id: "$service_type",
+                    count: { $sum: 1 },
+                    completed: {
+                      $sum: {
+                        $cond: [{ $eq: ["$status", "completed"] }, 1, 0],
+                      },
+                    },
+                    pending: {
+                      $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
+                    },
+                    cancelled: {
+                      $sum: {
+                        $cond: [
+                          { $in: ["$status", ["cancelled", "rejected"]] },
+                          1,
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                },
+                { $sort: { count: -1 } },
+              ],
+              topWorkers: [
+                {
+                  $match: {
+                    status: "completed",
+                    worker: { $exists: true, $ne: null },
+                    ...(hasDateFilter ? dateFilter : {}),
+                  },
+                },
+                { $limit: 100000 },
+                { $group: { _id: "$worker", totalJobs: { $sum: 1 } } },
+                { $sort: { totalJobs: -1 } },
+                { $limit: 10 },
+                {
+                  $lookup: {
+                    from: "workers",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "workerInfo",
+                  },
+                },
                 {
                   $unwind: {
-                    path: "$vehicles",
-                    preserveNullAndEmptyArrays: false,
+                    path: "$workerInfo",
+                    preserveNullAndEmptyArrays: true,
                   },
                 },
-                { $group: { _id: null, totalVehicles: { $sum: 1 } } },
+              ],
+              buildingAnalytics: [
+                {
+                  $match: {
+                    customer: { $exists: true, $ne: null },
+                    ...(hasDateFilter ? dateFilter : {}),
+                  },
+                },
+                { $limit: 50000 },
+                {
+                  $lookup: {
+                    from: "customers",
+                    localField: "customer",
+                    foreignField: "_id",
+                    as: "customerInfo",
+                  },
+                },
+                {
+                  $unwind: {
+                    path: "$customerInfo",
+                    preserveNullAndEmptyArrays: true,
+                  },
+                },
+                {
+                  $group: {
+                    _id: "$customerInfo.building",
+                    totalJobs: { $sum: 1 },
+                    completedJobs: {
+                      $sum: {
+                        $cond: [{ $eq: ["$status", "completed"] }, 1, 0],
+                      },
+                    },
+                  },
+                },
+                { $match: { _id: { $exists: true, $ne: null } } },
+                { $sort: { totalJobs: -1 } },
+                { $limit: 20 },
+                {
+                  $lookup: {
+                    from: "buildings",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "buildingInfo",
+                  },
+                },
+                {
+                  $unwind: {
+                    path: "$buildingInfo",
+                    preserveNullAndEmptyArrays: true,
+                  },
+                },
+              ],
+              todayJobs: [
+                { $match: { createdAt: { $gte: todayStart } } },
+                { $count: "count" },
+              ],
+              yesterdayJobs: [
+                {
+                  $match: {
+                    createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                  },
+                },
+                { $count: "count" },
+              ],
+              thisWeekJobs: [
+                { $match: { createdAt: { $gte: thisWeekStart } } },
+                { $count: "count" },
+              ],
+              lastWeekJobs: [
+                {
+                  $match: {
+                    createdAt: { $gte: lastWeekStart, $lt: lastWeekEnd },
+                  },
+                },
+                { $count: "count" },
+              ],
+              thisMonthJobs: [
+                { $match: { createdAt: { $gte: thisMonthStart } } },
+                { $count: "count" },
+              ],
+              lastMonthJobs: [
+                {
+                  $match: {
+                    createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd },
+                  },
+                },
+                { $count: "count" },
               ],
             },
           },
         ]),
-        WorkersModel.aggregate([
+
+        // Payments aggregation with $facet
+        PaymentsModel.aggregate([
           { $match: { isDeleted: false } },
           {
-            $group: {
-              _id: null,
-              total: { $sum: 1 },
-              active: { $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] } },
-              inactive: { $sum: { $cond: [{ $eq: ["$status", 0] }, 1, 0] } },
+            $facet: {
+              paymentStats: [
+                { $match: hasDateFilter ? dateFilter : {} },
+                { $limit: 100000 },
+                {
+                  $group: {
+                    _id: "$status",
+                    count: { $sum: 1 },
+                    totalAmount: {
+                      $sum: {
+                        $ifNull: [
+                          "$total_amount",
+                          { $ifNull: ["$amount_charged", 0] },
+                        ],
+                      },
+                    },
+                    paidAmount: { $sum: "$amount_paid" },
+                    balance: { $sum: "$balance" },
+                  },
+                },
+              ],
+              paymentStatsByType: [
+                { $match: hasDateFilter ? dateFilter : {} },
+                { $limit: 100000 },
+                {
+                  $group: {
+                    _id: {
+                      status: "$status",
+                      onewash: { $ifNull: ["$onewash", false] },
+                    },
+                    count: { $sum: 1 },
+                    totalAmount: {
+                      $sum: {
+                        $ifNull: [
+                          "$total_amount",
+                          { $ifNull: ["$amount_charged", 0] },
+                        ],
+                      },
+                    },
+                  },
+                },
+              ],
+              dueBreakdown: [
+                { $match: hasDateFilter ? dateFilter : {} },
+                {
+                  $match: {
+                    status: "pending",
+                  },
+                },
+                {
+                  $addFields: {
+                    effectiveTotal: {
+                      $ifNull: [
+                        "$total_amount",
+                        { $ifNull: ["$amount_charged", 0] },
+                      ],
+                    },
+                    effectivePaid: { $ifNull: ["$amount_paid", 0] },
+                    effectiveOldBalance: {
+                      $max: [{ $ifNull: ["$old_balance", 0] }, 0],
+                    },
+                    dueDate: {
+                      $cond: [
+                        {
+                          $and: [
+                            { $ne: ["$billing_month", null] },
+                            { $ne: ["$billing_month", ""] },
+                          ],
+                        },
+                        {
+                          $dateSubtract: {
+                            startDate: {
+                              $dateAdd: {
+                                startDate: {
+                                  $dateFromString: {
+                                    dateString: {
+                                      $concat: [
+                                        "$billing_month",
+                                        "-01T00:00:00.000Z",
+                                      ],
+                                    },
+                                  },
+                                },
+                                unit: "month",
+                                amount: 1,
+                              },
+                            },
+                            unit: "millisecond",
+                            amount: 1,
+                          },
+                        },
+                        {
+                          $dateSubtract: {
+                            startDate: "$createdAt",
+                            unit: "day",
+                            amount: 1,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    outstandingAmount: {
+                      $max: [
+                        { $subtract: ["$effectiveTotal", "$effectivePaid"] },
+                        0,
+                      ],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    carryForwardOutstanding: {
+                      $min: ["$outstandingAmount", "$effectiveOldBalance"],
+                    },
+                    currentCycleIsOverdue: {
+                      $lt: ["$dueDate", new Date()],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    currentCycleOutstanding: {
+                      $max: [
+                        {
+                          $subtract: [
+                            "$outstandingAmount",
+                            "$carryForwardOutstanding",
+                          ],
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    overdueAmount: {
+                      $add: [
+                        "$carryForwardOutstanding",
+                        {
+                          $cond: [
+                            "$currentCycleIsOverdue",
+                            "$currentCycleOutstanding",
+                            0,
+                          ],
+                        },
+                      ],
+                    },
+                    pendingAmount: {
+                      $cond: [
+                        "$currentCycleIsOverdue",
+                        0,
+                        "$currentCycleOutstanding",
+                      ],
+                    },
+                  },
+                },
+                {
+                  $project: {
+                    buckets: [
+                      {
+                        category: "overdue",
+                        amount: "$overdueAmount",
+                        count: {
+                          $cond: [{ $gt: ["$overdueAmount", 0] }, 1, 0],
+                        },
+                      },
+                      {
+                        category: "pending",
+                        amount: "$pendingAmount",
+                        count: {
+                          $cond: [
+                            {
+                              $and: [
+                                { $eq: ["$overdueAmount", 0] },
+                                { $gt: ["$pendingAmount", 0] },
+                              ],
+                            },
+                            1,
+                            0,
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+                { $unwind: "$buckets" },
+                {
+                  $match: {
+                    "buckets.amount": { $gt: 0 },
+                  },
+                },
+                {
+                  $group: {
+                    _id: "$buckets.category",
+                    amount: { $sum: "$buckets.amount" },
+                    count: { $sum: "$buckets.count" },
+                  },
+                },
+              ],
+              dueBreakdownByType: [
+                { $match: hasDateFilter ? dateFilter : {} },
+                {
+                  $match: {
+                    status: "pending",
+                  },
+                },
+                {
+                  $addFields: {
+                    effectiveTotal: {
+                      $ifNull: [
+                        "$total_amount",
+                        { $ifNull: ["$amount_charged", 0] },
+                      ],
+                    },
+                    effectivePaid: { $ifNull: ["$amount_paid", 0] },
+                    effectiveOldBalance: {
+                      $max: [{ $ifNull: ["$old_balance", 0] }, 0],
+                    },
+                    dueDate: {
+                      $cond: [
+                        {
+                          $and: [
+                            { $ne: ["$billing_month", null] },
+                            { $ne: ["$billing_month", ""] },
+                          ],
+                        },
+                        {
+                          $dateSubtract: {
+                            startDate: {
+                              $dateAdd: {
+                                startDate: {
+                                  $dateFromString: {
+                                    dateString: {
+                                      $concat: [
+                                        "$billing_month",
+                                        "-01T00:00:00.000Z",
+                                      ],
+                                    },
+                                  },
+                                },
+                                unit: "month",
+                                amount: 1,
+                              },
+                            },
+                            unit: "millisecond",
+                            amount: 1,
+                          },
+                        },
+                        {
+                          $dateSubtract: {
+                            startDate: "$createdAt",
+                            unit: "day",
+                            amount: 1,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    outstandingAmount: {
+                      $max: [
+                        { $subtract: ["$effectiveTotal", "$effectivePaid"] },
+                        0,
+                      ],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    carryForwardOutstanding: {
+                      $min: ["$outstandingAmount", "$effectiveOldBalance"],
+                    },
+                    currentCycleIsOverdue: {
+                      $lt: ["$dueDate", new Date()],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    currentCycleOutstanding: {
+                      $max: [
+                        {
+                          $subtract: [
+                            "$outstandingAmount",
+                            "$carryForwardOutstanding",
+                          ],
+                        },
+                        0,
+                      ],
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    overdueAmount: {
+                      $add: [
+                        "$carryForwardOutstanding",
+                        {
+                          $cond: [
+                            "$currentCycleIsOverdue",
+                            "$currentCycleOutstanding",
+                            0,
+                          ],
+                        },
+                      ],
+                    },
+                    pendingAmount: {
+                      $cond: [
+                        "$currentCycleIsOverdue",
+                        0,
+                        "$currentCycleOutstanding",
+                      ],
+                    },
+                  },
+                },
+                {
+                  $project: {
+                    onewash: { $ifNull: ["$onewash", false] },
+                    buckets: [
+                      {
+                        category: "overdue",
+                        amount: "$overdueAmount",
+                        count: {
+                          $cond: [{ $gt: ["$overdueAmount", 0] }, 1, 0],
+                        },
+                      },
+                      {
+                        category: "pending",
+                        amount: "$pendingAmount",
+                        count: {
+                          $cond: [
+                            {
+                              $and: [
+                                { $eq: ["$overdueAmount", 0] },
+                                { $gt: ["$pendingAmount", 0] },
+                              ],
+                            },
+                            1,
+                            0,
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+                { $unwind: "$buckets" },
+                {
+                  $match: {
+                    "buckets.amount": { $gt: 0 },
+                  },
+                },
+                {
+                  $group: {
+                    _id: {
+                      category: "$buckets.category",
+                      onewash: "$onewash",
+                    },
+                    amount: { $sum: "$buckets.amount" },
+                    count: { $sum: "$buckets.count" },
+                  },
+                },
+              ],
+              residenceChartData: [
+                {
+                  $match: {
+                    status: { $in: ["completed", "pending"] },
+                    createdAt: chartDateRange,
+                    onewash: false,
+                  },
+                },
+                {
+                  $group: {
+                    _id: { month: { $month: "$createdAt" }, status: "$status" },
+                    count: { $sum: 1 },
+                  },
+                },
+                { $sort: { "_id.month": 1 } },
+                { $limit: 24 },
+              ],
+              onewashChartData: [
+                {
+                  $match: {
+                    status: { $in: ["completed", "pending"] },
+                    createdAt: chartDateRange,
+                    onewash: true,
+                  },
+                },
+                {
+                  $group: {
+                    _id: { month: { $month: "$createdAt" }, status: "$status" },
+                    count: { $sum: 1 },
+                  },
+                },
+                { $sort: { "_id.month": 1 } },
+                { $limit: 24 },
+              ],
+              revenueTrends: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: revenueTrendDateRange,
+                  },
+                },
+                { $limit: 50000 },
+                {
+                  $group: {
+                    _id: {
+                      date: {
+                        $dateToString: {
+                          format: "%Y-%m-%d",
+                          date: "$createdAt",
+                        },
+                      },
+                    },
+                    revenue: { $sum: "$amount_paid" },
+                    count: { $sum: 1 },
+                  },
+                },
+                { $sort: { "_id.date": 1 } },
+                { $limit: 90 },
+              ],
+              topWorkersRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    worker: { $exists: true, $ne: null },
+                    ...(hasDateFilter ? dateFilter : {}),
+                  },
+                },
+                { $limit: 100000 },
+                {
+                  $group: {
+                    _id: "$worker",
+                    totalRevenue: { $sum: "$amount_paid" },
+                    totalJobs: { $sum: 1 },
+                  },
+                },
+                { $sort: { totalRevenue: -1 } },
+                { $limit: 1 },
+              ],
+              serviceRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    job: { $exists: true, $ne: null },
+                    ...(hasDateFilter ? dateFilter : {}),
+                  },
+                },
+                { $limit: 50000 },
+                {
+                  $lookup: {
+                    from: "jobs",
+                    localField: "job",
+                    foreignField: "_id",
+                    as: "jobInfo",
+                  },
+                },
+                {
+                  $unwind: {
+                    path: "$jobInfo",
+                    preserveNullAndEmptyArrays: true,
+                  },
+                },
+                {
+                  $match: {
+                    "jobInfo.service_type": { $exists: true, $ne: null },
+                  },
+                },
+                {
+                  $group: {
+                    _id: "$jobInfo.service_type",
+                    revenue: { $sum: "$amount_paid" },
+                  },
+                },
+              ],
+              todayRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: { $gte: todayStart },
+                  },
+                },
+                { $group: { _id: null, total: { $sum: "$amount_paid" } } },
+              ],
+              yesterdayRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                  },
+                },
+                { $group: { _id: null, total: { $sum: "$amount_paid" } } },
+              ],
+              thisWeekRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: { $gte: thisWeekStart },
+                  },
+                },
+                { $group: { _id: null, total: { $sum: "$amount_paid" } } },
+              ],
+              lastWeekRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: { $gte: lastWeekStart, $lt: lastWeekEnd },
+                  },
+                },
+                { $group: { _id: null, total: { $sum: "$amount_paid" } } },
+              ],
+              thisMonthRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: { $gte: thisMonthStart },
+                  },
+                },
+                { $group: { _id: null, total: { $sum: "$amount_paid" } } },
+              ],
+              lastMonthRevenue: [
+                {
+                  $match: {
+                    status: "completed",
+                    createdAt: { $gte: lastMonthStart, $lt: lastMonthEnd },
+                  },
+                },
+                { $group: { _id: null, total: { $sum: "$amount_paid" } } },
+              ],
             },
           },
         ]),
-        BuildingsModel.countDocuments({ isDeleted: false }),
-        StaffModel.aggregate([
-          { $match: { isDeleted: false } },
-          {
-            $group: {
-              _id: null,
-              total: { $sum: 1 },
-              active: { $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] } },
+
+        // Simple counts
+        Promise.all([
+          CustomersModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $facet: {
+                counts: [
+                  {
+                    $group: {
+                      _id: null,
+                      total: { $sum: 1 },
+                      active: {
+                        $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] },
+                      },
+                      inactive: {
+                        $sum: { $cond: [{ $eq: ["$status", 0] }, 1, 0] },
+                      },
+                    },
+                  },
+                ],
+                vehicles: [
+                  {
+                    $unwind: {
+                      path: "$vehicles",
+                      preserveNullAndEmptyArrays: false,
+                    },
+                  },
+                  { $group: { _id: null, totalVehicles: { $sum: 1 } } },
+                ],
+              },
             },
-          },
+          ]),
+          WorkersModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                active: { $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] } },
+                inactive: { $sum: { $cond: [{ $eq: ["$status", 0] }, 1, 0] } },
+              },
+            },
+          ]),
+          BuildingsModel.countDocuments({ isDeleted: false }),
+          StaffModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                active: { $sum: { $cond: [{ $eq: ["$status", 1] }, 1, 0] } },
+              },
+            },
+          ]),
+          OneWashModel.aggregate([
+            {
+              $match: {
+                status: { $in: ["completed", "pending"] },
+                isDeleted: false,
+                createdAt: chartDateRange,
+              },
+            },
+            {
+              $group: {
+                _id: { month: { $month: "$createdAt" }, status: "$status" },
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { "_id.month": 1 } },
+            { $limit: 24 },
+          ]),
+          OneWashModel.aggregate([
+            {
+              $match: {
+                isDeleted: false,
+                ...(hasDateFilter ? dateFilter : {}),
+              },
+            },
+            {
+              $group: {
+                _id: "$status",
+                count: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ]),
         ]),
-        OneWashModel.aggregate([
-          {
-            $match: {
-              status: { $in: ["completed", "pending"] },
-              isDeleted: false,
-              createdAt: { $gte: yearStart, $lt: yearEnd },
+        Promise.all([
+          PaymentsModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $facet: {
+                todayPaymentStats: [
+                  {
+                    $match: {
+                      createdAt: { $gte: todayStart },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: "$status",
+                      count: { $sum: 1 },
+                      totalAmount: {
+                        $sum: {
+                          $ifNull: [
+                            "$total_amount",
+                            { $ifNull: ["$amount_charged", 0] },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+                yesterdayPaymentStats: [
+                  {
+                    $match: {
+                      createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: "$status",
+                      count: { $sum: 1 },
+                      totalAmount: {
+                        $sum: {
+                          $ifNull: [
+                            "$total_amount",
+                            { $ifNull: ["$amount_charged", 0] },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+                todayDueBreakdown: [
+                  {
+                    $match: {
+                      createdAt: { $gte: todayStart },
+                      status: "pending",
+                    },
+                  },
+                  {
+                    $addFields: {
+                      effectiveTotal: {
+                        $ifNull: [
+                          "$total_amount",
+                          { $ifNull: ["$amount_charged", 0] },
+                        ],
+                      },
+                      effectivePaid: { $ifNull: ["$amount_paid", 0] },
+                      effectiveOldBalance: {
+                        $max: [{ $ifNull: ["$old_balance", 0] }, 0],
+                      },
+                      dueDate: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $ne: ["$billing_month", null] },
+                              { $ne: ["$billing_month", ""] },
+                            ],
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: {
+                                $dateAdd: {
+                                  startDate: {
+                                    $dateFromString: {
+                                      dateString: {
+                                        $concat: [
+                                          "$billing_month",
+                                          "-01T00:00:00.000Z",
+                                        ],
+                                      },
+                                    },
+                                  },
+                                  unit: "month",
+                                  amount: 1,
+                                },
+                              },
+                              unit: "millisecond",
+                              amount: 1,
+                            },
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: "$createdAt",
+                              unit: "day",
+                              amount: 1,
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      outstandingAmount: {
+                        $max: [
+                          { $subtract: ["$effectiveTotal", "$effectivePaid"] },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      carryForwardOutstanding: {
+                        $min: ["$outstandingAmount", "$effectiveOldBalance"],
+                      },
+                      currentCycleIsOverdue: {
+                        $lt: ["$dueDate", new Date()],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      currentCycleOutstanding: {
+                        $max: [
+                          {
+                            $subtract: [
+                              "$outstandingAmount",
+                              "$carryForwardOutstanding",
+                            ],
+                          },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      overdueAmount: {
+                        $add: [
+                          "$carryForwardOutstanding",
+                          {
+                            $cond: [
+                              "$currentCycleIsOverdue",
+                              "$currentCycleOutstanding",
+                              0,
+                            ],
+                          },
+                        ],
+                      },
+                      pendingAmount: {
+                        $cond: [
+                          "$currentCycleIsOverdue",
+                          0,
+                          "$currentCycleOutstanding",
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      buckets: [
+                        {
+                          category: "overdue",
+                          amount: "$overdueAmount",
+                          count: {
+                            $cond: [{ $gt: ["$overdueAmount", 0] }, 1, 0],
+                          },
+                        },
+                        {
+                          category: "pending",
+                          amount: "$pendingAmount",
+                          count: {
+                            $cond: [
+                              {
+                                $and: [
+                                  { $eq: ["$overdueAmount", 0] },
+                                  { $gt: ["$pendingAmount", 0] },
+                                ],
+                              },
+                              1,
+                              0,
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  { $unwind: "$buckets" },
+                  { $match: { "buckets.amount": { $gt: 0 } } },
+                  {
+                    $group: {
+                      _id: "$buckets.category",
+                      amount: { $sum: "$buckets.amount" },
+                      count: { $sum: "$buckets.count" },
+                    },
+                  },
+                ],
+                yesterdayDueBreakdown: [
+                  {
+                    $match: {
+                      createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                      status: "pending",
+                    },
+                  },
+                  {
+                    $addFields: {
+                      effectiveTotal: {
+                        $ifNull: [
+                          "$total_amount",
+                          { $ifNull: ["$amount_charged", 0] },
+                        ],
+                      },
+                      effectivePaid: { $ifNull: ["$amount_paid", 0] },
+                      effectiveOldBalance: {
+                        $max: [{ $ifNull: ["$old_balance", 0] }, 0],
+                      },
+                      dueDate: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $ne: ["$billing_month", null] },
+                              { $ne: ["$billing_month", ""] },
+                            ],
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: {
+                                $dateAdd: {
+                                  startDate: {
+                                    $dateFromString: {
+                                      dateString: {
+                                        $concat: [
+                                          "$billing_month",
+                                          "-01T00:00:00.000Z",
+                                        ],
+                                      },
+                                    },
+                                  },
+                                  unit: "month",
+                                  amount: 1,
+                                },
+                              },
+                              unit: "millisecond",
+                              amount: 1,
+                            },
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: "$createdAt",
+                              unit: "day",
+                              amount: 1,
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      outstandingAmount: {
+                        $max: [
+                          { $subtract: ["$effectiveTotal", "$effectivePaid"] },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      carryForwardOutstanding: {
+                        $min: ["$outstandingAmount", "$effectiveOldBalance"],
+                      },
+                      currentCycleIsOverdue: {
+                        $lt: ["$dueDate", new Date()],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      currentCycleOutstanding: {
+                        $max: [
+                          {
+                            $subtract: [
+                              "$outstandingAmount",
+                              "$carryForwardOutstanding",
+                            ],
+                          },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      overdueAmount: {
+                        $add: [
+                          "$carryForwardOutstanding",
+                          {
+                            $cond: [
+                              "$currentCycleIsOverdue",
+                              "$currentCycleOutstanding",
+                              0,
+                            ],
+                          },
+                        ],
+                      },
+                      pendingAmount: {
+                        $cond: [
+                          "$currentCycleIsOverdue",
+                          0,
+                          "$currentCycleOutstanding",
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      buckets: [
+                        {
+                          category: "overdue",
+                          amount: "$overdueAmount",
+                          count: {
+                            $cond: [{ $gt: ["$overdueAmount", 0] }, 1, 0],
+                          },
+                        },
+                        {
+                          category: "pending",
+                          amount: "$pendingAmount",
+                          count: {
+                            $cond: [
+                              {
+                                $and: [
+                                  { $eq: ["$overdueAmount", 0] },
+                                  { $gt: ["$pendingAmount", 0] },
+                                ],
+                              },
+                              1,
+                              0,
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  { $unwind: "$buckets" },
+                  { $match: { "buckets.amount": { $gt: 0 } } },
+                  {
+                    $group: {
+                      _id: "$buckets.category",
+                      amount: { $sum: "$buckets.amount" },
+                      count: { $sum: "$buckets.count" },
+                    },
+                  },
+                ],
+              },
             },
-          },
-          {
-            $group: {
-              _id: { month: { $month: "$createdAt" }, status: "$status" },
-              count: { $sum: 1 },
+          ]),
+          PaymentsModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $facet: {
+                todayPaymentStatsByType: [
+                  {
+                    $match: {
+                      createdAt: { $gte: todayStart },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: {
+                        status: "$status",
+                        onewash: { $ifNull: ["$onewash", false] },
+                      },
+                      count: { $sum: 1 },
+                      totalAmount: {
+                        $sum: {
+                          $ifNull: [
+                            "$total_amount",
+                            { $ifNull: ["$amount_charged", 0] },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+                yesterdayPaymentStatsByType: [
+                  {
+                    $match: {
+                      createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: {
+                        status: "$status",
+                        onewash: { $ifNull: ["$onewash", false] },
+                      },
+                      count: { $sum: 1 },
+                      totalAmount: {
+                        $sum: {
+                          $ifNull: [
+                            "$total_amount",
+                            { $ifNull: ["$amount_charged", 0] },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                ],
+                todayDueBreakdownByType: [
+                  {
+                    $match: {
+                      createdAt: { $gte: todayStart },
+                      status: "pending",
+                    },
+                  },
+                  {
+                    $addFields: {
+                      effectiveTotal: {
+                        $ifNull: [
+                          "$total_amount",
+                          { $ifNull: ["$amount_charged", 0] },
+                        ],
+                      },
+                      effectivePaid: { $ifNull: ["$amount_paid", 0] },
+                      effectiveOldBalance: {
+                        $max: [{ $ifNull: ["$old_balance", 0] }, 0],
+                      },
+                      dueDate: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $ne: ["$billing_month", null] },
+                              { $ne: ["$billing_month", ""] },
+                            ],
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: {
+                                $dateAdd: {
+                                  startDate: {
+                                    $dateFromString: {
+                                      dateString: {
+                                        $concat: [
+                                          "$billing_month",
+                                          "-01T00:00:00.000Z",
+                                        ],
+                                      },
+                                    },
+                                  },
+                                  unit: "month",
+                                  amount: 1,
+                                },
+                              },
+                              unit: "millisecond",
+                              amount: 1,
+                            },
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: "$createdAt",
+                              unit: "day",
+                              amount: 1,
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      outstandingAmount: {
+                        $max: [
+                          { $subtract: ["$effectiveTotal", "$effectivePaid"] },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      carryForwardOutstanding: {
+                        $min: ["$outstandingAmount", "$effectiveOldBalance"],
+                      },
+                      currentCycleIsOverdue: {
+                        $lt: ["$dueDate", new Date()],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      currentCycleOutstanding: {
+                        $max: [
+                          {
+                            $subtract: [
+                              "$outstandingAmount",
+                              "$carryForwardOutstanding",
+                            ],
+                          },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      overdueAmount: {
+                        $add: [
+                          "$carryForwardOutstanding",
+                          {
+                            $cond: [
+                              "$currentCycleIsOverdue",
+                              "$currentCycleOutstanding",
+                              0,
+                            ],
+                          },
+                        ],
+                      },
+                      pendingAmount: {
+                        $cond: [
+                          "$currentCycleIsOverdue",
+                          0,
+                          "$currentCycleOutstanding",
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      onewash: { $ifNull: ["$onewash", false] },
+                      buckets: [
+                        {
+                          category: "overdue",
+                          amount: "$overdueAmount",
+                          count: {
+                            $cond: [{ $gt: ["$overdueAmount", 0] }, 1, 0],
+                          },
+                        },
+                        {
+                          category: "pending",
+                          amount: "$pendingAmount",
+                          count: {
+                            $cond: [
+                              {
+                                $and: [
+                                  { $eq: ["$overdueAmount", 0] },
+                                  { $gt: ["$pendingAmount", 0] },
+                                ],
+                              },
+                              1,
+                              0,
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  { $unwind: "$buckets" },
+                  {
+                    $match: {
+                      "buckets.amount": { $gt: 0 },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: {
+                        category: "$buckets.category",
+                        onewash: "$onewash",
+                      },
+                      amount: { $sum: "$buckets.amount" },
+                      count: { $sum: "$buckets.count" },
+                    },
+                  },
+                ],
+                yesterdayDueBreakdownByType: [
+                  {
+                    $match: {
+                      createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                      status: "pending",
+                    },
+                  },
+                  {
+                    $addFields: {
+                      effectiveTotal: {
+                        $ifNull: [
+                          "$total_amount",
+                          { $ifNull: ["$amount_charged", 0] },
+                        ],
+                      },
+                      effectivePaid: { $ifNull: ["$amount_paid", 0] },
+                      effectiveOldBalance: {
+                        $max: [{ $ifNull: ["$old_balance", 0] }, 0],
+                      },
+                      dueDate: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $ne: ["$billing_month", null] },
+                              { $ne: ["$billing_month", ""] },
+                            ],
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: {
+                                $dateAdd: {
+                                  startDate: {
+                                    $dateFromString: {
+                                      dateString: {
+                                        $concat: [
+                                          "$billing_month",
+                                          "-01T00:00:00.000Z",
+                                        ],
+                                      },
+                                    },
+                                  },
+                                  unit: "month",
+                                  amount: 1,
+                                },
+                              },
+                              unit: "millisecond",
+                              amount: 1,
+                            },
+                          },
+                          {
+                            $dateSubtract: {
+                              startDate: "$createdAt",
+                              unit: "day",
+                              amount: 1,
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      outstandingAmount: {
+                        $max: [
+                          { $subtract: ["$effectiveTotal", "$effectivePaid"] },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      carryForwardOutstanding: {
+                        $min: ["$outstandingAmount", "$effectiveOldBalance"],
+                      },
+                      currentCycleIsOverdue: {
+                        $lt: ["$dueDate", new Date()],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      currentCycleOutstanding: {
+                        $max: [
+                          {
+                            $subtract: [
+                              "$outstandingAmount",
+                              "$carryForwardOutstanding",
+                            ],
+                          },
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $addFields: {
+                      overdueAmount: {
+                        $add: [
+                          "$carryForwardOutstanding",
+                          {
+                            $cond: [
+                              "$currentCycleIsOverdue",
+                              "$currentCycleOutstanding",
+                              0,
+                            ],
+                          },
+                        ],
+                      },
+                      pendingAmount: {
+                        $cond: [
+                          "$currentCycleIsOverdue",
+                          0,
+                          "$currentCycleOutstanding",
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      onewash: { $ifNull: ["$onewash", false] },
+                      buckets: [
+                        {
+                          category: "overdue",
+                          amount: "$overdueAmount",
+                          count: {
+                            $cond: [{ $gt: ["$overdueAmount", 0] }, 1, 0],
+                          },
+                        },
+                        {
+                          category: "pending",
+                          amount: "$pendingAmount",
+                          count: {
+                            $cond: [
+                              {
+                                $and: [
+                                  { $eq: ["$overdueAmount", 0] },
+                                  { $gt: ["$pendingAmount", 0] },
+                                ],
+                              },
+                              1,
+                              0,
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  { $unwind: "$buckets" },
+                  {
+                    $match: {
+                      "buckets.amount": { $gt: 0 },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: {
+                        category: "$buckets.category",
+                        onewash: "$onewash",
+                      },
+                      amount: { $sum: "$buckets.amount" },
+                      count: { $sum: "$buckets.count" },
+                    },
+                  },
+                ],
+              },
             },
-          },
-          { $sort: { "_id.month": 1 } },
-          { $limit: 24 },
+          ]),
+          JobsModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $facet: {
+                todayStatus: [
+                  { $match: { createdAt: { $gte: todayStart } } },
+                  { $group: { _id: "$status", count: { $sum: 1 } } },
+                ],
+                yesterdayStatus: [
+                  {
+                    $match: {
+                      createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                    },
+                  },
+                  { $group: { _id: "$status", count: { $sum: 1 } } },
+                ],
+              },
+            },
+          ]),
+          OneWashModel.aggregate([
+            { $match: { isDeleted: false } },
+            {
+              $facet: {
+                todayStatus: [
+                  { $match: { createdAt: { $gte: todayStart } } },
+                  { $group: { _id: "$status", count: { $sum: 1 } } },
+                ],
+                yesterdayStatus: [
+                  {
+                    $match: {
+                      createdAt: { $gte: yesterdayStart, $lt: todayStart },
+                    },
+                  },
+                  { $group: { _id: "$status", count: { $sum: 1 } } },
+                ],
+              },
+            },
+          ]),
         ]),
-      ]),
-    ]);
+      ]);
 
     // Process results
     const jobStats = jobsData[0].basicStats[0] || {};
@@ -544,6 +1738,9 @@ service.dashboardAll = async (userInfo, query) => {
     const lastMonthJobsCount = jobsData[0].lastMonthJobs[0]?.count || 0;
 
     const paymentStats = paymentsData[0].paymentStats || [];
+    const paymentStatsByType = paymentsData[0].paymentStatsByType || [];
+    const dueBreakdown = paymentsData[0].dueBreakdown || [];
+    const dueBreakdownByType = paymentsData[0].dueBreakdownByType || [];
     const paymentsChartData = paymentsData[0].residenceChartData || [];
     const onewashPaymentsChartData = paymentsData[0].onewashChartData || [];
     const revenueTrendsData = paymentsData[0].revenueTrends || [];
@@ -562,35 +1759,272 @@ service.dashboardAll = async (userInfo, query) => {
       totalBuildings,
       staffData,
       onewashJobsChartData,
+      onewashJobStatusStats,
     ] = simpleCountsData;
     const customerStats = customersData[0].counts[0] || {};
     const totalVehicles = customersData[0].vehicles[0]?.totalVehicles || 0;
     const workerStats = workersData[0] || {};
     const staffStats = staffData[0] || {};
+    const [
+      dailyPaymentsData,
+      dailyPaymentsByTypeData,
+      dailyResidenceJobsData,
+      dailyOnewashJobsData,
+    ] = dailySnapshotData;
 
-    // Process payment stats
-    let totalPayments = 0,
-      collectedPayments = 0,
-      pendingPayments = 0,
-      overduePayments = 0,
-      paymentCount = 0;
-    paymentStats.forEach((stat) => {
-      paymentCount += stat.count;
-      totalPayments += stat.totalAmount || 0;
-      if (stat._id === "collected" || stat._id === "completed")
-        collectedPayments += stat.paidAmount || 0;
-      else if (stat._id === "pending") pendingPayments += stat.totalAmount || 0;
-      else if (stat._id === "overdue") overduePayments += stat.totalAmount || 0;
+    const buildPaymentSummary = (statsRows = [], dueRows = []) => {
+      let total = 0;
+      let collected = 0;
+      let pending = 0;
+      let overdue = 0;
+      let count = 0;
+      let pendingCount = 0;
+      let overdueCount = 0;
+
+      statsRows.forEach((stat) => {
+        count += stat.count || 0;
+        total += stat.totalAmount || 0;
+        if (stat._id === "completed" || stat._id === "collected") {
+          collected += stat.totalAmount || 0;
+        }
+      });
+
+      dueRows.forEach((bucket) => {
+        if (bucket._id === "overdue") {
+          overdue += bucket.amount || 0;
+          overdueCount += bucket.count || 0;
+        } else if (bucket._id === "pending") {
+          pending += bucket.amount || 0;
+          pendingCount += bucket.count || 0;
+        }
+      });
+
+      const collectionRate =
+        total > 0 ? Math.min(100, (collected / total) * 100) : 0;
+
+      return {
+        total,
+        collected,
+        pending,
+        overdue,
+        count,
+        pendingCount,
+        overdueCount,
+        collectionRate,
+      };
+    };
+
+    const paymentStatsRowsByService = {
+      residence: [],
+      onewash: [],
+    };
+
+    paymentStatsByType.forEach((row) => {
+      const key = row?._id?.onewash ? "onewash" : "residence";
+      paymentStatsRowsByService[key].push({
+        _id: row?._id?.status,
+        count: row.count || 0,
+        totalAmount: row.totalAmount || 0,
+      });
     });
 
+    const dueRowsByService = {
+      residence: [],
+      onewash: [],
+    };
+
+    dueBreakdownByType.forEach((row) => {
+      const key = row?._id?.onewash ? "onewash" : "residence";
+      dueRowsByService[key].push({
+        _id: row?._id?.category,
+        amount: row.amount || 0,
+        count: row.count || 0,
+      });
+    });
+
+    const paymentSummaryBoth = buildPaymentSummary(paymentStats, dueBreakdown);
+    const paymentSummaryResidence = buildPaymentSummary(
+      paymentStatsRowsByService.residence,
+      dueRowsByService.residence,
+    );
+    const paymentSummaryOnewash = buildPaymentSummary(
+      paymentStatsRowsByService.onewash,
+      dueRowsByService.onewash,
+    );
+
+    const totalPayments = paymentSummaryBoth.total;
+    const collectedPayments = paymentSummaryBoth.collected;
+    const pendingPayments = paymentSummaryBoth.pending;
+    const overduePayments = paymentSummaryBoth.overdue;
+    const paymentCount = paymentSummaryBoth.count;
+    const pendingCount = paymentSummaryBoth.pendingCount;
+    const overdueCount = paymentSummaryBoth.overdueCount;
+
+    const buildJobSummary = (statusRows = []) => {
+      let total = 0;
+      let completed = 0;
+      let pending = 0;
+      let cancelled = 0;
+
+      statusRows.forEach((row) => {
+        const status = String(row?._id || "").toLowerCase();
+        const count = row?.count || 0;
+
+        total += count;
+
+        if (status === "completed") {
+          completed += count;
+        } else if (status === "pending") {
+          pending += count;
+        } else if (status === "cancelled" || status === "rejected") {
+          cancelled += count;
+        }
+      });
+
+      const completionRate = total > 0 ? (completed / total) * 100 : 0;
+
+      return {
+        total,
+        completed,
+        pending,
+        cancelled,
+        completionRate,
+      };
+    };
+
+    const residenceJobSummary = buildJobSummary([
+      { _id: "completed", count: jobStats.completed || 0 },
+      { _id: "pending", count: jobStats.pending || 0 },
+      { _id: "rejected", count: jobStats.cancelled || 0 },
+    ]);
+    const onewashJobSummary = buildJobSummary(onewashJobStatusStats || []);
+    const bothJobSummary = {
+      total: residenceJobSummary.total + onewashJobSummary.total,
+      completed: residenceJobSummary.completed + onewashJobSummary.completed,
+      pending: residenceJobSummary.pending + onewashJobSummary.pending,
+      cancelled: residenceJobSummary.cancelled + onewashJobSummary.cancelled,
+      completionRate: 0,
+    };
+    bothJobSummary.completionRate =
+      bothJobSummary.total > 0
+        ? (bothJobSummary.completed / bothJobSummary.total) * 100
+        : 0;
+
+    const dailyPaymentsFacet = dailyPaymentsData[0] || {};
+    const dailyPaymentsByTypeFacet = dailyPaymentsByTypeData[0] || {};
+
+    const splitRowsByServiceType = (rows = [], mapRow) => {
+      const grouped = {
+        residence: [],
+        onewash: [],
+      };
+
+      rows.forEach((row) => {
+        const key = row?._id?.onewash ? "onewash" : "residence";
+        grouped[key].push(mapRow(row));
+      });
+
+      return grouped;
+    };
+
+    const buildDailyPaymentSummaryByService = (
+      statsByType = [],
+      dueByType = [],
+    ) => {
+      const statsRows = splitRowsByServiceType(statsByType, (row) => ({
+        _id: row?._id?.status,
+        count: row.count || 0,
+        totalAmount: row.totalAmount || 0,
+      }));
+
+      const dueRows = splitRowsByServiceType(dueByType, (row) => ({
+        _id: row?._id?.category,
+        amount: row.amount || 0,
+        count: row.count || 0,
+      }));
+
+      const residence = buildPaymentSummary(
+        statsRows.residence,
+        dueRows.residence,
+      );
+      const onewash = buildPaymentSummary(statsRows.onewash, dueRows.onewash);
+      const both = buildPaymentSummary(
+        [...statsRows.residence, ...statsRows.onewash],
+        [...dueRows.residence, ...dueRows.onewash],
+      );
+
+      return {
+        both,
+        residence,
+        onewash,
+      };
+    };
+
+    const todayPaymentSummary = buildPaymentSummary(
+      dailyPaymentsFacet.todayPaymentStats || [],
+      dailyPaymentsFacet.todayDueBreakdown || [],
+    );
+    const yesterdayPaymentSummary = buildPaymentSummary(
+      dailyPaymentsFacet.yesterdayPaymentStats || [],
+      dailyPaymentsFacet.yesterdayDueBreakdown || [],
+    );
+
+    const todayPaymentSummaryByService = buildDailyPaymentSummaryByService(
+      dailyPaymentsByTypeFacet.todayPaymentStatsByType || [],
+      dailyPaymentsByTypeFacet.todayDueBreakdownByType || [],
+    );
+
+    const yesterdayPaymentSummaryByService = buildDailyPaymentSummaryByService(
+      dailyPaymentsByTypeFacet.yesterdayPaymentStatsByType || [],
+      dailyPaymentsByTypeFacet.yesterdayDueBreakdownByType || [],
+    );
+
+    const dailyResidenceJobsFacet = dailyResidenceJobsData[0] || {};
+    const dailyOnewashJobsFacet = dailyOnewashJobsData[0] || {};
+
+    const mergeJobSummaries = (left = {}, right = {}) => {
+      const merged = {
+        total: (left.total || 0) + (right.total || 0),
+        completed: (left.completed || 0) + (right.completed || 0),
+        pending: (left.pending || 0) + (right.pending || 0),
+        cancelled: (left.cancelled || 0) + (right.cancelled || 0),
+        completionRate: 0,
+      };
+
+      merged.completionRate =
+        merged.total > 0 ? (merged.completed / merged.total) * 100 : 0;
+
+      return merged;
+    };
+
+    const todayResidenceJobsSummary = buildJobSummary(
+      dailyResidenceJobsFacet.todayStatus || [],
+    );
+    const todayOnewashJobsSummary = buildJobSummary(
+      dailyOnewashJobsFacet.todayStatus || [],
+    );
+    const todayJobsSummary = mergeJobSummaries(
+      todayResidenceJobsSummary,
+      todayOnewashJobsSummary,
+    );
+
+    const yesterdayResidenceJobsSummary = buildJobSummary(
+      dailyResidenceJobsFacet.yesterdayStatus || [],
+    );
+    const yesterdayOnewashJobsSummary = buildJobSummary(
+      dailyOnewashJobsFacet.yesterdayStatus || [],
+    );
+    const yesterdayJobsSummary = mergeJobSummaries(
+      yesterdayResidenceJobsSummary,
+      yesterdayOnewashJobsSummary,
+    );
+
     // Calculate metrics
-    const totalJobs = jobStats.total || 0;
-    const completedJobs = jobStats.completed || 0;
+    const totalJobs = bothJobSummary.total || 0;
+    const completedJobs = bothJobSummary.completed || 0;
     const activeWorkers = workerStats.active || 0;
-    const collectionRate =
-      totalPayments > 0 ? (collectedPayments / totalPayments) * 100 : 0;
-    const completionRate =
-      totalJobs > 0 ? (completedJobs / totalJobs) * 100 : 0;
+    const collectionRate = paymentSummaryBoth.collectionRate;
+    const completionRate = bothJobSummary.completionRate || 0;
     const avgPaymentPerJob =
       completedJobs > 0 ? collectedPayments / completedJobs : null;
     const avgJobsPerWorker =
@@ -683,7 +2117,13 @@ service.dashboardAll = async (userInfo, query) => {
     });
 
     // Ensure all 4 service types are present
-    const requiredServiceTypes = ["residence", "site", "mall", "mobile"];
+    const requiredServiceTypes = [
+      "residence",
+      "onewash",
+      "site",
+      "mall",
+      "mobile",
+    ];
     const serviceDistribution = requiredServiceTypes.map((serviceType) => {
       if (existingServicesMap[serviceType]) {
         return existingServicesMap[serviceType];
@@ -766,21 +2206,42 @@ service.dashboardAll = async (userInfo, query) => {
           pending: pendingPayments,
           overdue: overduePayments,
           count: paymentCount,
+          pendingCount,
+          overdueCount,
           averagePerJob: avgPaymentPerJob,
           collectionRate: collectionRate,
         },
+        paymentsByService: {
+          both: {
+            ...paymentSummaryBoth,
+            averagePerJob: avgPaymentPerJob,
+          },
+          residence: {
+            ...paymentSummaryResidence,
+            averagePerJob: null,
+          },
+          onewash: {
+            ...paymentSummaryOnewash,
+            averagePerJob: null,
+          },
+        },
         jobs: {
-          total: totalJobs,
-          completed: completedJobs,
-          pending: jobStats.pending || 0,
-          cancelled: jobStats.cancelled || 0,
+          total: bothJobSummary.total,
+          completed: bothJobSummary.completed,
+          pending: bothJobSummary.pending,
+          cancelled: bothJobSummary.cancelled,
           completionRate: completionRate,
         },
+        jobsByService: {
+          both: bothJobSummary,
+          residence: residenceJobSummary,
+          onewash: onewashJobSummary,
+        },
         serviceTypes: {
-          residence: jobStats.residence || 0,
+          residence: residenceJobSummary.total,
           commercial: jobStats.commercial || 0,
           mall: jobStats.mall || 0,
-          onewash: jobStats.onewash || 0,
+          onewash: onewashJobSummary.total,
         },
         customers: {
           total: customerStats.total || 0,
@@ -814,6 +2275,36 @@ service.dashboardAll = async (userInfo, query) => {
                 100
               : 0,
           totalVehicles: totalVehicles,
+        },
+        dailyOverview: {
+          today: {
+            payments: todayPaymentSummary,
+            paymentsByService: {
+              both: todayPaymentSummaryByService.both,
+              residence: todayPaymentSummaryByService.residence,
+              onewash: todayPaymentSummaryByService.onewash,
+            },
+            jobs: todayJobsSummary,
+            jobsByService: {
+              both: todayJobsSummary,
+              residence: todayResidenceJobsSummary,
+              onewash: todayOnewashJobsSummary,
+            },
+          },
+          yesterday: {
+            payments: yesterdayPaymentSummary,
+            paymentsByService: {
+              both: yesterdayPaymentSummaryByService.both,
+              residence: yesterdayPaymentSummaryByService.residence,
+              onewash: yesterdayPaymentSummaryByService.onewash,
+            },
+            jobs: yesterdayJobsSummary,
+            jobsByService: {
+              both: yesterdayJobsSummary,
+              residence: yesterdayResidenceJobsSummary,
+              onewash: yesterdayOnewashJobsSummary,
+            },
+          },
         },
       },
       charts: {

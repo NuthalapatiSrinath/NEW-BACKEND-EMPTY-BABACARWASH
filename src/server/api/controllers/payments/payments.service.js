@@ -12,6 +12,177 @@ const InAppNotifications = require("../../../notifications/in-app.notifications"
 
 const service = module.exports;
 
+const toMoney = (value) => {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(number * 100) / 100;
+};
+
+const moneyEquals = (left, right) => {
+  return Math.abs(toMoney(left) - toMoney(right)) < 0.005;
+};
+
+const getVehicleMatchQuery = (payment) => {
+  if (!payment || !payment.vehicle) return null;
+
+  // Preferred matching for subscription invoices.
+  if (
+    payment.vehicle &&
+    typeof payment.vehicle === "object" &&
+    Object.prototype.hasOwnProperty.call(payment.vehicle, "_id") &&
+    payment.vehicle._id !== null &&
+    payment.vehicle._id !== undefined &&
+    payment.vehicle._id !== ""
+  ) {
+    return { "vehicle._id": payment.vehicle._id };
+  }
+
+  if (
+    typeof payment.vehicle === "string" ||
+    typeof payment.vehicle === "number"
+  ) {
+    return { "vehicle._id": payment.vehicle };
+  }
+
+  if (payment.vehicle?.registration_no) {
+    return {
+      "vehicle.registration_no": payment.vehicle.registration_no,
+      ...(payment.vehicle?.parking_no
+        ? { "vehicle.parking_no": payment.vehicle.parking_no }
+        : null),
+    };
+  }
+
+  return null;
+};
+
+const getAmountCharged = (payment) => {
+  if (payment.amount_charged !== undefined && payment.amount_charged !== null) {
+    return toMoney(payment.amount_charged);
+  }
+  return Math.max(
+    0,
+    toMoney(payment.total_amount) - toMoney(payment.old_balance),
+  );
+};
+
+const syncFutureCarryForwardBalances = async ({
+  paymentId,
+  userId,
+  context,
+}) => {
+  try {
+    const sourcePayment = await PaymentsModel.findOne({
+      _id: paymentId,
+      isDeleted: { $ne: true },
+    })
+      .select("_id customer vehicle onewash balance")
+      .lean();
+
+    if (!sourcePayment || sourcePayment.onewash || !sourcePayment.customer) {
+      return { updatedCount: 0, skipped: true };
+    }
+
+    const vehicleQuery = getVehicleMatchQuery(sourcePayment);
+    if (!vehicleQuery) {
+      return { updatedCount: 0, skipped: true };
+    }
+
+    const relatedBills = await PaymentsModel.find({
+      customer: sourcePayment.customer,
+      onewash: false,
+      isDeleted: { $ne: true },
+      ...vehicleQuery,
+    })
+      .sort({ createdAt: 1, _id: 1 })
+      .select({
+        _id: 1,
+        amount_charged: 1,
+        amount_paid: 1,
+        old_balance: 1,
+        total_amount: 1,
+        balance: 1,
+        status: 1,
+      })
+      .lean();
+
+    if (relatedBills.length < 2) {
+      return { updatedCount: 0, skipped: true };
+    }
+
+    const sourceIndex = relatedBills.findIndex(
+      (bill) => String(bill._id) === String(sourcePayment._id),
+    );
+
+    if (sourceIndex === -1 || sourceIndex === relatedBills.length - 1) {
+      return { updatedCount: 0, skipped: true };
+    }
+
+    let previousBalance = Math.max(
+      0,
+      toMoney(relatedBills[sourceIndex].balance),
+    );
+    const now = new Date();
+    const bulkOps = [];
+
+    for (let index = sourceIndex + 1; index < relatedBills.length; index++) {
+      const bill = relatedBills[index];
+
+      const nextOldBalance = Math.max(0, toMoney(previousBalance));
+      const amountCharged = getAmountCharged(bill);
+      const nextTotalAmount = toMoney(amountCharged + nextOldBalance);
+      const paidAmount = toMoney(bill.amount_paid);
+      const nextBalance = Math.max(0, toMoney(nextTotalAmount - paidAmount));
+      const nextStatus =
+        paidAmount >= nextTotalAmount ? "completed" : "pending";
+
+      const shouldUpdate =
+        !moneyEquals(bill.old_balance, nextOldBalance) ||
+        !moneyEquals(bill.total_amount, nextTotalAmount) ||
+        !moneyEquals(bill.balance, nextBalance) ||
+        (bill.status || "pending") !== nextStatus;
+
+      if (shouldUpdate) {
+        const updateSet = {
+          old_balance: nextOldBalance,
+          total_amount: nextTotalAmount,
+          balance: nextBalance,
+          status: nextStatus,
+          updatedAt: now,
+        };
+
+        if (userId) {
+          updateSet.updatedBy = userId;
+        }
+
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: bill._id },
+            update: { $set: updateSet },
+          },
+        });
+      }
+
+      previousBalance = nextBalance;
+    }
+
+    if (bulkOps.length > 0) {
+      await PaymentsModel.bulkWrite(bulkOps);
+      console.log(
+        `✅ [CARRY-FORWARD SYNC] ${context || "unknown"}: updated ${bulkOps.length} future bill(s) from payment ${paymentId}`,
+      );
+    }
+
+    return { updatedCount: bulkOps.length, skipped: false };
+  } catch (error) {
+    console.error(
+      `❌ [CARRY-FORWARD SYNC] ${context || "unknown"}: failed for payment ${paymentId}`,
+      error.message,
+    );
+    return { updatedCount: 0, skipped: true, error: error.message };
+  }
+};
+
 service.list = async (userInfo, query) => {
   try {
     console.log("🔵 [SERVICE] Payments list started with query:", query);
@@ -430,7 +601,7 @@ service.updatePayment = async (userInfo, id, payload) => {
 
 /**
  * Edit the total amount of a payment with reason tracking.
- * Recalculates balance and status, and updates next month's bill if it exists.
+ * Recalculates balance and status, then syncs carry-forward to all future bills.
  */
 service.editPaymentAmount = async (userInfo, id, payload) => {
   const { new_total_amount, reason } = payload;
@@ -500,64 +671,11 @@ service.editPaymentAmount = async (userInfo, id, payload) => {
     },
   );
 
-  // If next month's bill exists for the same customer/vehicle,
-  // update its old_balance to reflect the new balance of this payment
-  const balanceDiff = newBalance - oldBalance;
-  if (balanceDiff !== 0 && payment.customer && payment.vehicle) {
-    const vehicleId = payment.vehicle._id || payment.vehicle;
-    const paymentDate = new Date(payment.createdAt);
-    const nextMonth = paymentDate.getMonth() + 1;
-    const nextYear = paymentDate.getFullYear() + Math.floor(nextMonth / 12);
-    const nextMonthIndex = nextMonth % 12;
-    const nextMonthStart = new Date(nextYear, nextMonthIndex, 1);
-    const nextMonthEnd = new Date(
-      nextYear,
-      nextMonthIndex + 1,
-      0,
-      23,
-      59,
-      59,
-      999,
-    );
-
-    const nextMonthBill = await PaymentsModel.findOne({
-      customer: payment.customer._id || payment.customer,
-      "vehicle._id": vehicleId,
-      isDeleted: false,
-      onewash: false,
-      createdAt: { $gte: nextMonthStart, $lte: nextMonthEnd },
-    }).lean();
-
-    if (nextMonthBill) {
-      const newOldBalance = Math.max(
-        0,
-        (nextMonthBill.old_balance || 0) + balanceDiff,
-      );
-      const newNextTotal = (nextMonthBill.amount_charged || 0) + newOldBalance;
-      const newNextBalance = newNextTotal - (nextMonthBill.amount_paid || 0);
-
-      await PaymentsModel.updateOne(
-        { _id: nextMonthBill._id },
-        {
-          $set: {
-            old_balance: newOldBalance,
-            total_amount: newNextTotal,
-            balance: Math.max(0, newNextBalance),
-            status:
-              (nextMonthBill.amount_paid || 0) >= newNextTotal
-                ? "completed"
-                : "pending",
-            updatedBy: userInfo._id,
-            updatedAt: new Date(),
-          },
-        },
-      );
-
-      console.log(
-        `✅ [EDIT AMOUNT] Updated next month bill ${nextMonthBill._id}: old_balance ${nextMonthBill.old_balance} → ${newOldBalance}, total ${nextMonthBill.total_amount} → ${newNextTotal}`,
-      );
-    }
-  }
+  await syncFutureCarryForwardBalances({
+    paymentId: id,
+    userId: userInfo._id,
+    context: "editPaymentAmount",
+  });
 
   console.log(
     `✅ [EDIT AMOUNT] Payment ${id}: total ${oldTotal} → ${newTotal}, balance ${oldBalance} → ${newBalance}, reason: ${reason}`,
@@ -597,6 +715,12 @@ service.collectPayment = async (userInfo, id, payload) => {
   }
 
   await PaymentsModel.updateOne({ _id: id }, { $set: updateData });
+
+  await syncFutureCarryForwardBalances({
+    paymentId: id,
+    userId: userInfo._id,
+    context: "collectPayment",
+  });
 
   await new TransactionsModel({
     payment: id,
@@ -1366,6 +1490,41 @@ service.bulkUpdateStatus = async (userInfo, payload) => {
       console.log(`🚀 [SERVICE] Executing ${bulkOps.length} updates...`);
       const result = await PaymentsModel.bulkWrite(bulkOps);
       console.log("✅ [SERVICE] Bulk write result:", JSON.stringify(result));
+
+      // Keep carry-forward chain consistent for subscription bills after bulk changes.
+      const subscriptionChainSeeds = new Map();
+
+      for (const payment of payments) {
+        if (payment.onewash || !payment.customer || !payment.vehicle) continue;
+
+        const vehicleToken =
+          (payment.vehicle && typeof payment.vehicle === "object"
+            ? payment.vehicle._id || payment.vehicle.registration_no
+            : payment.vehicle) || payment._id;
+
+        const chainKey = `${String(payment.customer)}__${String(vehicleToken)}`;
+        const existingSeed = subscriptionChainSeeds.get(chainKey);
+
+        if (!existingSeed) {
+          subscriptionChainSeeds.set(chainKey, payment);
+          continue;
+        }
+
+        const existingTime = new Date(existingSeed.createdAt || 0).getTime();
+        const currentTime = new Date(payment.createdAt || 0).getTime();
+
+        if (currentTime < existingTime) {
+          subscriptionChainSeeds.set(chainKey, payment);
+        }
+      }
+
+      for (const seedPayment of subscriptionChainSeeds.values()) {
+        await syncFutureCarryForwardBalances({
+          paymentId: seedPayment._id,
+          userId: userInfo._id,
+          context: "bulkUpdateStatus",
+        });
+      }
     } else {
       console.log("⚠️ [SERVICE] No operations to execute.");
     }
