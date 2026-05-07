@@ -715,8 +715,10 @@ service.collectPayment = async (userInfo, id, payload) => {
     collectedDate: payload.payment_date,
   };
 
-  // If payment is fully completed and doesn't have receipt_no yet, generate it
-  if (status === "completed" && !paymentData.receipt_no) {
+  const receiptNo = String(payload?.receipt_no || "").trim();
+  if (receiptNo) {
+    updateData.receipt_no = receiptNo;
+  } else if (status === "completed" && !paymentData.receipt_no) {
     updateData.receipt_no = `RCP${String(paymentData.id).padStart(6, "0")}`;
   }
 

@@ -1735,7 +1735,9 @@ service.getSOA = async (userInfo, query, customerId) => {
   const allOneWashTransactions = oneWashPayments.map((payment, index) => {
     const matchedJob = jobsById.get(String(payment?.job || ""));
 
-    const vehicleIdFromPayment = normalizeVehicleIdFromPayment(payment?.vehicle);
+    const vehicleIdFromPayment = normalizeVehicleIdFromPayment(
+      payment?.vehicle,
+    );
     const vehicleId = vehicleIdFromPayment || String(matchedJob?.vehicle || "");
 
     const paymentVehicle =
@@ -1756,7 +1758,8 @@ service.getSOA = async (userInfo, query, customerId) => {
         ? toMoneySafe(payment.amount_charged)
         : Math.max(
             0,
-            toMoneySafe(payment?.total_amount) - toMoneySafe(payment?.tip_amount),
+            toMoneySafe(payment?.total_amount) -
+              toMoneySafe(payment?.tip_amount),
           );
     const tipAmount = toMoneySafe(payment?.tip_amount);
     const billedAmount =
@@ -1841,13 +1844,14 @@ service.getSOA = async (userInfo, query, customerId) => {
       billingMonth,
       monthLabel,
       vehicleId,
-      registrationNo:
-        vehicleMeta?.registrationNo || job?.registration_no || "",
+      registrationNo: vehicleMeta?.registrationNo || job?.registration_no || "",
       parkingNo: vehicleMeta?.parkingNo || job?.parking_no || "",
       scheduleId: job?.scheduleId || "",
       status: String(job?.status || "pending").toUpperCase(),
       activityType,
-      washType: String(job?.wash_type || "").trim().toUpperCase(),
+      washType: String(job?.wash_type || "")
+        .trim()
+        .toUpperCase(),
       amount,
       tipAmount,
       workerName: String(job?.worker?.name || "").trim(),
@@ -1860,7 +1864,10 @@ service.getSOA = async (userInfo, query, customerId) => {
   });
 
   const isEntryWithinFilters = (entry) => {
-    if (selectedVehicleId && String(entry.vehicleId || "") !== selectedVehicleId) {
+    if (
+      selectedVehicleId &&
+      String(entry.vehicleId || "") !== selectedVehicleId
+    ) {
       return false;
     }
 
@@ -1880,13 +1887,7 @@ service.getSOA = async (userInfo, query, customerId) => {
   };
 
   const availableMonths = Array.from(
-    new Set(
-      [
-        ...allTransactions.map((entry) => entry.billingMonth),
-        ...allOneWashTransactions.map((entry) => entry.billingMonth),
-        ...allWashActivities.map((entry) => entry.billingMonth),
-      ].filter(Boolean),
-    ),
+    new Set(allTransactions.map((entry) => entry.billingMonth).filter(Boolean)),
   )
     .sort((a, b) => a.localeCompare(b))
     .map((monthKey) => ({
@@ -1895,9 +1896,8 @@ service.getSOA = async (userInfo, query, customerId) => {
     }));
 
   const filteredTransactions = allTransactions.filter(isEntryWithinFilters);
-  const filteredOneWashTransactions = allOneWashTransactions.filter(
-    isEntryWithinFilters,
-  );
+  const filteredOneWashTransactions =
+    allOneWashTransactions.filter(isEntryWithinFilters);
   const filteredWashActivities = allWashActivities.filter(isEntryWithinFilters);
 
   const monthlyMap = new Map();
@@ -2006,6 +2006,29 @@ service.getSOA = async (userInfo, query, customerId) => {
     0,
   );
 
+  const latestBalanceByVehicle = new Map();
+  filteredTransactions.forEach((entry) => {
+    const vehicleKey = entry.vehicleId
+      ? `id:${String(entry.vehicleId).trim()}`
+      : `rp:${String(entry.registrationNo || "").trim()}__${String(
+          entry.parkingNo || "",
+        ).trim()}`;
+    if (!vehicleKey || vehicleKey === "rp:__") return;
+
+    const nextTimestamp = new Date(entry.createdAt || 0).getTime();
+    const current = latestBalanceByVehicle.get(vehicleKey);
+    const currentTimestamp = new Date(current?.createdAt || 0).getTime();
+
+    if (!current || nextTimestamp >= currentTimestamp) {
+      latestBalanceByVehicle.set(vehicleKey, entry);
+    }
+  });
+
+  const totalLatestDue = Array.from(latestBalanceByVehicle.values()).reduce(
+    (acc, entry) => acc + Math.max(0, toMoneySafe(entry.dueAmount)),
+    0,
+  );
+
   const summary = filteredTransactions.reduce(
     (acc, entry) => {
       acc.totalOpeningBalance += entry.openingBalance;
@@ -2023,6 +2046,8 @@ service.getSOA = async (userInfo, query, customerId) => {
       totalDue: 0,
     },
   );
+
+  summary.totalDue = totalLatestDue;
 
   const oneWashSummary = filteredOneWashTransactions.reduce(
     (acc, entry) => {
@@ -2113,9 +2138,10 @@ service.getSOA = async (userInfo, query, customerId) => {
   const oneWashCollectionPercent =
     oneWashSummary.totalBilled > 0
       ? Number(
-          ((oneWashSummary.totalPaid / oneWashSummary.totalBilled) * 100).toFixed(
-            1,
-          ),
+          (
+            (oneWashSummary.totalPaid / oneWashSummary.totalBilled) *
+            100
+          ).toFixed(1),
         )
       : 0;
 

@@ -14,10 +14,11 @@ const MallsModel = require("../../models/malls.model");
 const LocationsModel = require("../locations/locations.model");
 const paymentsListService = require("../payments/payments.service");
 const onewashListService = require("../onewash/onewash.service");
-const {
-  analyzePromptWithGemini,
-  isGeminiConfigured,
-} = require("./gemini.intent");
+const geminiHelpers = require("./gemini.intent");
+const analyzePromptWithGemini = geminiHelpers.analyzePromptWithGemini;
+const isGeminiConfigured = geminiHelpers.isGeminiConfigured;
+const generateGeminiReply =
+  geminiHelpers.generateGeminiReply || (async () => "");
 
 const service = module.exports;
 
@@ -27,11 +28,18 @@ const isPlainObject = (value) =>
 const normalizeDomain = (value = "") => String(value).trim().toLowerCase();
 
 const DEFAULT_DOMAIN_LIMIT = 25;
-const DEFAULT_PROMPT_LIMIT = 8;
-const PROMPT_MAX_LIMIT = 20;
+const DEFAULT_PROMPT_LIMIT = 20;
+const PROMPT_MAX_LIMIT = 50;
 const PERSON_SUGGESTION_LIMIT = 8;
 const PAYMENT_RESULT_LIMIT = 1000;
-const GEMINI_INTENT_MIN_CONFIDENCE = 0.5;
+const GEMINI_INTENT_MIN_CONFIDENCE = Number(
+  process.env.GEMINI_MIN_CONFIDENCE || 0.5,
+);
+const GEMINI_FORCE = new Set(["1", "true", "yes", "on"]).has(
+  String(process.env.GEMINI_FORCE || "")
+    .trim()
+    .toLowerCase(),
+);
 
 const PAYMENT_INTENT_PATTERN =
   /(payment|payments|apyment|apyments|due|dues|receipt|rcp|settlement|collection|onewash|one wash|residence|vehicle|vehilce|parking|plate|invoice|bill)/i;
@@ -288,12 +296,140 @@ const normalizeLimit = (value, fallback = DEFAULT_DOMAIN_LIMIT, max = 200) => {
   return Math.min(Math.floor(parsed), max);
 };
 
+const GREETING_WORDS = new Set([
+  "hi",
+  "hello",
+  "hey",
+  "hai",
+  "hii",
+  "hiii",
+  "hlo",
+  "hlw",
+  "gm",
+  "goodmorning",
+  "goodafternoon",
+  "goodevening",
+  "bro",
+  "buddy",
+  "sir",
+  "man",
+]);
+
+const HELP_PATTERNS = [
+  /\bhow\s+are\s+(you|u)\b/i,
+  /\bwho\s+are\s+you\b/i,
+  /\bwhat\s+can\s+you\s+do\b/i,
+  /\bwhat\s+is\s+this\b/i,
+  /\bhow\s+does\s+this\s+ai\s+work\b/i,
+  /\bhow\s+is\s+this\s+ai\s+working\b/i,
+  /\btell\s+how\s+(is\s+)?this\s+ai\s+working\b/i,
+  /\bhow\s+this\s+ai\s+works\b/i,
+  /\btell\s+me\s+about\s+this\s+ai\b/i,
+  /\bwhat'?s\s+going\s+on\b/i,
+  /\btell\s+me\s+what'?s\s+going\s+on\b/i,
+  /\bhelp\b/i,
+  /\bguide\b/i,
+];
+
+const HELP_OVERRIDE_PATTERNS = [
+  /\bhow\b.*\bpay\w{2,}\b.*\b(work|working|process|system)\b/i,
+  /\btell\b.*\bpay\w{2,}\b.*\b(work|working|process|system)\b/i,
+  /\bgive\b.*\bpay\w{2,}\b.*\b(work|working|process|system)\b/i,
+  /\bexplain\b.*\bpay\w{2,}\b/i,
+];
+
+const buildPagination = ({
+  total = 0,
+  limit = DEFAULT_PROMPT_LIMIT,
+  page = 1,
+} = {}) => {
+  const safeLimit = Math.max(1, Number(limit) || DEFAULT_PROMPT_LIMIT);
+  const safePage = Math.max(1, Number(page) || 1);
+  const totalPages = Math.max(1, Math.ceil(Number(total || 0) / safeLimit));
+  return {
+    page: safePage,
+    limit: safeLimit,
+    totalPages,
+    hasNextPage: safePage < totalPages,
+    hasPrevPage: safePage > 1,
+  };
+};
+
+const SEARCH_LIKE_PATTERN =
+  /(customer|customers|worker|workers|staff|building|buildings|mall|malls|location|locations|site|sites|job|jobs|vehicle|vehilce|parking|receipt|rcp|invoice|bill|payment|payments|due|balance)/i;
+
 const tokenizePrompt = (prompt = "") =>
   String(prompt)
     .toLowerCase()
     .replace(/[^a-z0-9+]+/g, " ")
     .split(/\s+/)
     .filter(Boolean);
+
+const isGreetingPrompt = (prompt = "") => {
+  const tokens = tokenizePrompt(prompt);
+  if (!tokens.length || tokens.length > 3) {
+    return false;
+  }
+
+  return tokens.every((token) => GREETING_WORDS.has(token));
+};
+
+const isHelpPrompt = (prompt = "") => {
+  const text = String(prompt || "");
+  if (HELP_OVERRIDE_PATTERNS.some((pattern) => pattern.test(text))) {
+    return true;
+  }
+
+  if (!HELP_PATTERNS.some((pattern) => pattern.test(text))) {
+    return false;
+  }
+
+  if (SEARCH_LIKE_PATTERN.test(text) || /\d/.test(text)) {
+    return false;
+  }
+
+  return true;
+};
+
+const buildAssistantResponse = (prompt = "", text = "", llm = null) => ({
+  mode: "prompt",
+  prompt,
+  keyword: "",
+  parsed: {
+    phone: null,
+    objectId: null,
+    nameLike: null,
+    paymentLookup: null,
+    domainsSearched: [],
+    ...(llm ? { llm } : {}),
+  },
+  text,
+  total: 0,
+  matchedDomains: 0,
+  results: [],
+  primaryResult: null,
+});
+
+const buildGreetingResponse = (prompt = "") =>
+  buildAssistantResponse(
+    prompt,
+    "Hi! Tell me what to search (customer name, vehicle no, receipt no, or payments this month).",
+  );
+
+const buildHelpResponse = (prompt = "") =>
+  buildAssistantResponse(
+    prompt,
+    "I can search your data. Try: customer name/mobile, vehicle no, receipt no, or payments this month.",
+  );
+
+const buildGeminiOrFallbackResponse = async (prompt, fallbackText) => {
+  const reply = await generateGeminiReply({ prompt });
+  if (reply) {
+    return buildAssistantResponse(prompt, reply, { provider: "gemini" });
+  }
+
+  return buildAssistantResponse(prompt, fallbackText);
+};
 
 const collectHintedDomains = (prompt = "", tokens = []) => {
   const promptLower = String(prompt || "").toLowerCase();
@@ -1433,9 +1569,7 @@ const toLabelList = (rows = [], labelFn) => {
     return [];
   }
 
-  return rows
-    .map((row) => String(labelFn(row) || "").trim())
-    .filter(Boolean);
+  return rows.map((row) => String(labelFn(row) || "").trim()).filter(Boolean);
 };
 
 const intersectIds = (left = [], right = []) => {
@@ -1614,7 +1748,9 @@ const resolvePromptEntityFilters = async (structuredFilters = {}) => {
             .lean()
         : [];
 
-      explicitBuildingIds = toUniqueStringIds(buildings.map((item) => item._id));
+      explicitBuildingIds = toUniqueStringIds(
+        buildings.map((item) => item._id),
+      );
       const labels = toLabelList(buildings, (item) => item.name);
 
       if (!explicitBuildingIds.length) {
@@ -1791,7 +1927,9 @@ const toPeriodPromptText = (period = null) => {
     return "last month";
   }
 
-  return String(period?.label || "").trim().toLowerCase();
+  return String(period?.label || "")
+    .trim()
+    .toLowerCase();
 };
 
 const buildStructuredFilterSummary = ({
@@ -1812,7 +1950,9 @@ const buildStructuredFilterSummary = ({
     parts.push(`${paymentMode} mode`);
   }
 
-  const serviceCategory = String(structuredFilters.serviceCategory || "").trim();
+  const serviceCategory = String(
+    structuredFilters.serviceCategory || "",
+  ).trim();
   if (serviceCategory) {
     parts.push(`${serviceCategory} payments`);
   }
@@ -1888,7 +2028,9 @@ const buildStructuredConversationActions = ({
   const existingPrompts = new Set();
 
   const addAction = (label, promptText) => {
-    const prompt = String(promptText || "").replace(/\s+/g, " ").trim();
+    const prompt = String(promptText || "")
+      .replace(/\s+/g, " ")
+      .trim();
     if (!label || !prompt || existingPrompts.has(prompt.toLowerCase())) {
       return;
     }
@@ -2067,7 +2209,8 @@ const enrichPaymentRowsForDisplay = async (rows = []) => {
     if (!onewash) {
       return {
         ...row,
-        display_service_type: row.display_service_type || getOneWashDisplayServiceType(row),
+        display_service_type:
+          row.display_service_type || getOneWashDisplayServiceType(row),
       };
     }
 
@@ -2078,12 +2221,32 @@ const enrichPaymentRowsForDisplay = async (rows = []) => {
       service_type: row.service_type || onewash.service_type,
       wash_type: row.wash_type || onewash.wash_type,
       amount:
-        row.amount !== undefined && row.amount !== null ? row.amount : onewash.amount,
+        row.amount !== undefined && row.amount !== null
+          ? row.amount
+          : onewash.amount,
       display_service_type:
-        row.display_service_type || getOneWashDisplayServiceType({ ...row, ...onewash }),
+        row.display_service_type ||
+        getOneWashDisplayServiceType({ ...row, ...onewash }),
     };
   });
 };
+
+const mapResidencePaymentsForChat = (rows = []) =>
+  (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    onewash: false,
+    serviceCategory: "residence",
+    serviceTypeLabel: "Residence",
+  }));
+
+const mapOneWashPaymentsForChat = (rows = []) =>
+  (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    onewash: true,
+    serviceCategory: "onewash",
+    display_service_type:
+      row.display_service_type || getOneWashDisplayServiceType(row),
+  }));
 
 const normalizeFilterValue = (value = "") => String(value || "").trim();
 
@@ -2093,7 +2256,11 @@ const normalizePaymentModeValue = (value = "") => {
     return "";
   }
 
-  if (["bank", "banktransfer", "bank-transfer", "bank transfer"].includes(normalized)) {
+  if (
+    ["bank", "banktransfer", "bank-transfer", "bank transfer"].includes(
+      normalized,
+    )
+  ) {
     return "bank transfer";
   }
 
@@ -2287,20 +2454,8 @@ const executeGroupedPaymentLookup = async ({
   const residenceSourceTotal = Number(residenceResult?.total || 0);
   const onewashSourceTotal = Number(onewashResult?.total || 0);
 
-  const residencePayments = residenceRows.map((row) => ({
-    ...row,
-    onewash: false,
-    serviceCategory: "residence",
-    serviceTypeLabel: "Residence",
-  }));
-
-  const onewashPayments = onewashRows.map((row) => ({
-    ...row,
-    onewash: true,
-    serviceCategory: "onewash",
-    display_service_type:
-      row.display_service_type || getOneWashDisplayServiceType(row),
-  }));
+  const residencePayments = mapResidencePaymentsForChat(residenceRows);
+  const onewashPayments = mapOneWashPaymentsForChat(onewashRows);
 
   const scopedResidencePayments = entityFilters
     ? applyResolvedEntityFiltersToRows({
@@ -2334,12 +2489,22 @@ const executeGroupedPaymentLookup = async ({
       )
     : scopedOneWashPayments;
 
-  const residenceTotal = amountCriteria || entityFilters
-    ? filteredResidencePayments.length
-    : residenceSourceTotal;
-  const onewashTotal = amountCriteria || entityFilters
-    ? filteredOneWashPayments.length
-    : onewashSourceTotal;
+  const residenceTotal =
+    amountCriteria || entityFilters
+      ? filteredResidencePayments.length
+      : residenceSourceTotal;
+  const onewashTotal =
+    amountCriteria || entityFilters
+      ? filteredOneWashPayments.length
+      : onewashSourceTotal;
+
+  const pageSize = commonFilters.pageSize;
+  const basePageInfo = {
+    action: "paymentsPage",
+    search: normalizedKeyword || "",
+    filters: normalizedFilters,
+    limit: pageSize,
+  };
 
   const results = [];
   if (filteredResidencePayments.length) {
@@ -2348,6 +2513,15 @@ const executeGroupedPaymentLookup = async ({
       label: "Residence Payments",
       total: residenceTotal,
       data: filteredResidencePayments,
+      pagination: buildPagination({
+        total: residenceTotal,
+        limit: pageSize,
+        page: 1,
+      }),
+      pageInfo: {
+        ...basePageInfo,
+        serviceCategory: "residence",
+      },
     });
   }
 
@@ -2357,6 +2531,15 @@ const executeGroupedPaymentLookup = async ({
       label: "One Wash Payments",
       total: onewashTotal,
       data: filteredOneWashPayments,
+      pagination: buildPagination({
+        total: onewashTotal,
+        limit: pageSize,
+        page: 1,
+      }),
+      pageInfo: {
+        ...basePageInfo,
+        serviceCategory: "onewash",
+      },
     });
   }
 
@@ -2619,6 +2802,20 @@ const runGeminiAssistedPromptSearch = async (payload = {}, userInfo = {}) => {
     return null;
   }
 
+  if (isHelpPrompt(prompt)) {
+    return buildGeminiOrFallbackResponse(
+      prompt,
+      "I can search your data. Try: customer name/mobile, vehicle no, receipt no, or payments this month.",
+    );
+  }
+
+  if (isGreetingPrompt(prompt)) {
+    return buildGeminiOrFallbackResponse(
+      prompt,
+      "Hi! Tell me what to search (customer name, vehicle no, receipt no, or payments this month).",
+    );
+  }
+
   const geminiIntent = await analyzePromptWithGemini({
     prompt,
     domainCatalog: service.listDomains(),
@@ -2629,14 +2826,17 @@ const runGeminiAssistedPromptSearch = async (payload = {}, userInfo = {}) => {
   }
 
   const confidence = Number(geminiIntent.confidence || 0);
-  if (!Number.isFinite(confidence) || confidence < GEMINI_INTENT_MIN_CONFIDENCE) {
+  if (
+    !GEMINI_FORCE &&
+    (!Number.isFinite(confidence) || confidence < GEMINI_INTENT_MIN_CONFIDENCE)
+  ) {
     return null;
   }
 
   const intent = normalizeDomain(geminiIntent.intent || "");
   const rewrittenQuery = String(geminiIntent.query || "").trim();
   const rewrittenKeyword = String(geminiIntent.keyword || "").trim();
-  const requestedDomains = Array.from(
+  let requestedDomains = Array.from(
     new Set(
       (Array.isArray(geminiIntent.domains) ? geminiIntent.domains : [])
         .map((item) => normalizeDomain(item))
@@ -2647,22 +2847,22 @@ const runGeminiAssistedPromptSearch = async (payload = {}, userInfo = {}) => {
   const hasRewrittenPrompt =
     rewrittenQuery && rewrittenQuery.toLowerCase() !== prompt.toLowerCase();
 
-  if (intent === "payments" || intent === "personpayments") {
-    if (!hasRewrittenPrompt) {
-      return null;
-    }
-
-    return service.searchByPrompt(
-      {
-        ...payload,
-        prompt: rewrittenQuery,
-        _skipGemini: true,
-      },
-      userInfo,
+  if (intent === "unknown" && !hasRewrittenPrompt) {
+    return buildGeminiOrFallbackResponse(
+      prompt,
+      "I can search your data. Try: customer name/mobile, vehicle no, receipt no, or payments this month.",
     );
   }
 
-  if (intent !== "search" || !requestedDomains.length) {
+  if (!requestedDomains.length) {
+    if (intent === "payments" || intent === "personpayments") {
+      requestedDomains = ["payments"];
+    } else if (GEMINI_FORCE) {
+      requestedDomains = [...PROMPT_FALLBACK_DOMAINS];
+    }
+  }
+
+  if (!requestedDomains.length) {
     if (!hasRewrittenPrompt) {
       return null;
     }
@@ -2684,7 +2884,7 @@ const runGeminiAssistedPromptSearch = async (payload = {}, userInfo = {}) => {
 
   const keyword = fetchAll
     ? ""
-    : String(rewrittenKeyword || rewrittenQuery || "").trim();
+    : String(rewrittenKeyword || rewrittenQuery || prompt).trim();
 
   const safeFilters = isPlainObject(geminiIntent.filters)
     ? geminiIntent.filters
@@ -2716,18 +2916,42 @@ const runGeminiAssistedPromptSearch = async (payload = {}, userInfo = {}) => {
   );
 
   if (!matched.length) {
-    if (!hasRewrittenPrompt) {
-      return null;
+    if (!GEMINI_FORCE) {
+      if (!hasRewrittenPrompt) {
+        return null;
+      }
+
+      return service.searchByPrompt(
+        {
+          ...payload,
+          prompt: rewrittenQuery,
+          _skipGemini: true,
+        },
+        userInfo,
+      );
     }
 
-    return service.searchByPrompt(
-      {
-        ...payload,
-        prompt: rewrittenQuery,
-        _skipGemini: true,
+    return {
+      mode: "prompt",
+      prompt,
+      keyword: keyword || rewrittenQuery || prompt,
+      parsed: {
+        phone: null,
+        objectId: null,
+        nameLike: null,
+        paymentLookup: null,
+        domainsSearched: requestedDomains,
+        llm: {
+          provider: "gemini",
+          confidence,
+        },
       },
-      userInfo,
-    );
+      text: `No records found for "${keyword || prompt}".`,
+      total: 0,
+      matchedDomains: 0,
+      results: [],
+      primaryResult: null,
+    };
   }
 
   const total = matched.reduce((sum, item) => sum + Number(item.total || 0), 0);
@@ -2757,6 +2981,21 @@ const runGeminiAssistedPromptSearch = async (payload = {}, userInfo = {}) => {
 };
 
 service.searchByPrompt = async (payload = {}, userInfo = {}) => {
+  const prompt = String(payload?.prompt || "").trim();
+  if (isHelpPrompt(prompt)) {
+    return buildGeminiOrFallbackResponse(
+      prompt,
+      "I can search your data. Try: customer name/mobile, vehicle no, receipt no, or payments this month.",
+    );
+  }
+
+  if (isGreetingPrompt(prompt)) {
+    return buildGeminiOrFallbackResponse(
+      prompt,
+      "Hi! Tell me what to search (customer name, vehicle no, receipt no, or payments this month).",
+    );
+  }
+
   const geminiAssistedResult = await runGeminiAssistedPromptSearch(
     payload,
     userInfo,
@@ -2784,29 +3023,31 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
   const promptRelativeDaysCount = extractPromptRelativeDaysCount(
     parsedPrompt.rawPrompt,
   );
-  const promptAmountCriteria = extractPaymentAmountCriteria(parsedPrompt.rawPrompt);
+  const promptAmountCriteria = extractPaymentAmountCriteria(
+    parsedPrompt.rawPrompt,
+  );
   const promptStructuredFilters = extractStructuredPaymentFiltersFromPrompt(
     parsedPrompt.rawPrompt,
   );
   const hasEntityScopedFilter = Boolean(
     promptStructuredFilters.customerTerm ||
-      promptStructuredFilters.workerTerm ||
-      promptStructuredFilters.staffTerm ||
-      promptStructuredFilters.buildingTerm ||
-      promptStructuredFilters.mallTerm ||
-      promptStructuredFilters.locationTerm,
+    promptStructuredFilters.workerTerm ||
+    promptStructuredFilters.staffTerm ||
+    promptStructuredFilters.buildingTerm ||
+    promptStructuredFilters.mallTerm ||
+    promptStructuredFilters.locationTerm,
   );
   const hasBaseStructuredPaymentFilter = Boolean(
     promptPeriodKey ||
-      promptRelativeDaysCount ||
-      promptAmountCriteria ||
-      promptStructuredFilters.status ||
-      promptStructuredFilters.payment_mode ||
-      promptStructuredFilters.serviceCategory,
+    promptRelativeDaysCount ||
+    promptAmountCriteria ||
+    promptStructuredFilters.status ||
+    promptStructuredFilters.payment_mode ||
+    promptStructuredFilters.serviceCategory,
   );
   const shouldRunStructuredPaymentFilter = Boolean(
     hasEntityScopedFilter ||
-      (!hasExplicitIdentity && hasBaseStructuredPaymentFilter),
+    (!hasExplicitIdentity && hasBaseStructuredPaymentFilter),
   );
   const wantsAllResults = hasFetchAllIntent(parsedPrompt.rawPrompt);
 
@@ -2973,11 +3214,11 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
 
     const shouldRunDirectPaymentLookup = Boolean(
       directPaymentKeyword &&
-        (parsedPrompt.paymentLookup ||
-          !isPersonLikeIdentity ||
-          /\b(vehicle|vehilce|parking|receipt|rcp|invoice|bill)\b/i.test(
-            parsedPrompt.rawPrompt,
-          )),
+      (parsedPrompt.paymentLookup ||
+        !isPersonLikeIdentity ||
+        /\b(vehicle|vehilce|parking|receipt|rcp|invoice|bill)\b/i.test(
+          parsedPrompt.rawPrompt,
+        )),
     );
 
     if (shouldRunDirectPaymentLookup) {
@@ -2992,7 +3233,11 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
         lookupText: directPaymentKeyword,
       });
 
-      if (shouldUsePageParityLookup && !parsedPrompt.objectId && !paymentNumericId) {
+      if (
+        shouldUsePageParityLookup &&
+        !parsedPrompt.objectId &&
+        !paymentNumericId
+      ) {
         const commonFilters = {
           pageNo: 0,
           pageSize: perDomainLimit,
@@ -3017,20 +3262,15 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
         const residenceTotal = Number(residenceResult?.total || 0);
         const onewashTotal = Number(onewashResult?.total || 0);
 
-        const residencePayments = residenceRows.map((row) => ({
-          ...row,
-          onewash: false,
-          serviceCategory: "residence",
-          serviceTypeLabel: "Residence",
-        }));
+        const residencePayments = mapResidencePaymentsForChat(residenceRows);
+        const onewashPayments = mapOneWashPaymentsForChat(onewashRows);
 
-        const onewashPayments = onewashRows.map((row) => ({
-          ...row,
-          onewash: true,
-          serviceCategory: "onewash",
-          display_service_type:
-            row.display_service_type || getOneWashDisplayServiceType(row),
-        }));
+        const pageInfoBase = {
+          action: "paymentsPage",
+          search: directPaymentKeyword || "",
+          filters: {},
+          limit: perDomainLimit,
+        };
 
         const results = [];
         if (residencePayments.length) {
@@ -3039,6 +3279,15 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
             label: "Residence Payments",
             total: residenceTotal,
             data: residencePayments,
+            pagination: buildPagination({
+              total: residenceTotal,
+              limit: perDomainLimit,
+              page: 1,
+            }),
+            pageInfo: {
+              ...pageInfoBase,
+              serviceCategory: "residence",
+            },
           });
         }
 
@@ -3048,6 +3297,15 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
             label: "One Wash Payments",
             total: onewashTotal,
             data: onewashPayments,
+            pagination: buildPagination({
+              total: onewashTotal,
+              limit: perDomainLimit,
+              page: 1,
+            }),
+            pageInfo: {
+              ...pageInfoBase,
+              serviceCategory: "onewash",
+            },
           });
         }
 
@@ -3092,7 +3350,9 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
             matchedDomains: results.length,
             results,
             primaryResult:
-              results.length && results[0].data.length ? results[0].data[0] : null,
+              results.length && results[0].data.length
+                ? results[0].data[0]
+                : null,
           };
         }
       }
@@ -3122,11 +3382,15 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
 
       const directResidenceRows = enrichedDirectRows.filter(
         (row) =>
-          !(row?.onewash || String(row?.serviceCategory || "").toLowerCase() === "onewash"),
+          !(
+            row?.onewash ||
+            String(row?.serviceCategory || "").toLowerCase() === "onewash"
+          ),
       );
       const directOneWashRows = enrichedDirectRows.filter(
         (row) =>
-          row?.onewash || String(row?.serviceCategory || "").toLowerCase() === "onewash",
+          row?.onewash ||
+          String(row?.serviceCategory || "").toLowerCase() === "onewash",
       );
 
       const groupedResults = [];
@@ -3202,7 +3466,9 @@ service.searchByPrompt = async (payload = {}, userInfo = {}) => {
           matchedDomains: groupedResults.length,
           results: groupedResults,
           primaryResult:
-            directTotal > 0 && groupedResults.length && groupedResults[0].data.length
+            directTotal > 0 &&
+            groupedResults.length &&
+            groupedResults[0].data.length
               ? groupedResults[0].data[0]
               : null,
         };
@@ -3397,19 +3663,8 @@ service.searchPersonPayments = async (payload = {}, userInfo = {}) => {
     ? onewashResult.data
     : [];
 
-  const residencePayments = residenceRows.map((row) => ({
-    ...row,
-    serviceCategory: "residence",
-    serviceTypeLabel: "Residence",
-  }));
-
-  const onewashPayments = onewashRows.map((row) => ({
-    ...row,
-    onewash: true,
-    serviceCategory: "onewash",
-    display_service_type:
-      row.display_service_type || getOneWashDisplayServiceType(row),
-  }));
+  const residencePayments = mapResidencePaymentsForChat(residenceRows);
+  const onewashPayments = mapOneWashPaymentsForChat(onewashRows);
 
   const results = [];
   if (residencePayments.length) {
@@ -3418,6 +3673,24 @@ service.searchPersonPayments = async (payload = {}, userInfo = {}) => {
       label: "Residence Payments",
       total: residenceTotal,
       data: residencePayments,
+      pagination: buildPagination({
+        total: residenceTotal,
+        limit,
+        page: 1,
+      }),
+      pageInfo: {
+        action: "paymentsPage",
+        serviceCategory: "residence",
+        search: "",
+        filters: {
+          startDate,
+          endDate,
+          ...(workerId ? { worker: workerId } : {}),
+          ...(customerId ? { customer: customerId } : {}),
+          ...(createdBy ? { createdBy } : {}),
+        },
+        limit,
+      },
     });
   }
 
@@ -3427,6 +3700,24 @@ service.searchPersonPayments = async (payload = {}, userInfo = {}) => {
       label: "One Wash Payments",
       total: onewashTotal,
       data: onewashPayments,
+      pagination: buildPagination({
+        total: onewashTotal,
+        limit,
+        page: 1,
+      }),
+      pageInfo: {
+        action: "paymentsPage",
+        serviceCategory: "onewash",
+        search: "",
+        filters: {
+          startDate,
+          endDate,
+          ...(workerId ? { worker: workerId } : {}),
+          ...(customerId ? { customer: customerId } : {}),
+          ...(createdBy ? { createdBy } : {}),
+        },
+        limit,
+      },
     });
   }
 
@@ -3487,7 +3778,60 @@ service.searchPersonPayments = async (payload = {}, userInfo = {}) => {
   };
 };
 
+service.searchPaymentsPage = async (payload = {}, userInfo = {}) => {
+  const serviceCategory = String(payload.serviceCategory || "")
+    .trim()
+    .toLowerCase();
+  const isOneWash = serviceCategory === "onewash";
+  const page = Math.max(1, Number(payload.page) || 1);
+  const limit = normalizeLimit(
+    payload.limit,
+    DEFAULT_PROMPT_LIMIT,
+    PAYMENT_RESULT_LIMIT,
+  );
+  const search = normalizeFilterValue(payload.search || payload.keyword || "");
+  const filters = isPlainObject(payload.filters) ? payload.filters : {};
+
+  const listPayload = {
+    pageNo: page - 1,
+    pageSize: limit,
+    ...(search ? { search } : {}),
+    ...filters,
+    ...(isOneWash ? {} : { onewash: "false" }),
+  };
+
+  const result = isOneWash
+    ? await onewashListService.list(userInfo || {}, listPayload)
+    : await paymentsListService.list(userInfo || {}, listPayload);
+
+  const rows = Array.isArray(result?.data) ? result.data : [];
+  const total = Number(result?.total || 0);
+
+  const data = isOneWash
+    ? mapOneWashPaymentsForChat(rows)
+    : mapResidencePaymentsForChat(rows);
+
+  return {
+    domain: "payments",
+    label: isOneWash ? "One Wash Payments" : "Residence Payments",
+    total,
+    data,
+    pagination: buildPagination({ total, limit, page }),
+    pageInfo: {
+      action: "paymentsPage",
+      serviceCategory: isOneWash ? "onewash" : "residence",
+      search,
+      filters,
+      limit,
+    },
+  };
+};
+
 service.search = async (payload = {}, userInfo = {}) => {
+  if (normalizeDomain(payload.action) === "paymentspage") {
+    return service.searchPaymentsPage(payload, userInfo);
+  }
+
   if (normalizeDomain(payload.action) === "personpayments") {
     return service.searchPersonPayments(payload, userInfo);
   }

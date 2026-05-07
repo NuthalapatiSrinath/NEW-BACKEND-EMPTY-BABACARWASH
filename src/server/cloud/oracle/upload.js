@@ -12,18 +12,20 @@ const getMimeType = (fileName) => {
   if (ext === ".pdf") return "application/pdf";
   if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
   if (ext === ".png") return "image/png";
+  if (ext === ".apk") return "application/vnd.android.package-archive";
   return "application/octet-stream"; // Default binary
 };
 
-async function uploadFile(filePath, fileName) {
+async function uploadFile(filePath, fileName, options = {}) {
   try {
     const stream = fs.createReadStream(filePath);
     const stats = fs.statSync(filePath);
 
     const contentType = getMimeType(fileName);
+    const contentDisposition = options.contentDisposition || "inline";
 
     console.log(
-      `[Oracle] Uploading: ${fileName} | Type: ${contentType} | Disposition: inline`
+      `[Oracle] Uploading: ${fileName} | Type: ${contentType} | Disposition: ${contentDisposition}`
     );
 
     await client.putObject({
@@ -32,8 +34,8 @@ async function uploadFile(filePath, fileName) {
       objectName: fileName,
       putObjectBody: stream,
       contentLength: stats.size,
-      contentType: contentType, // ✅ 1. Tell browser it's a PDF
-      contentDisposition: "inline", // ✅ 2. Tell browser to OPEN it, not download it
+      contentType: contentType,
+      contentDisposition: contentDisposition,
     });
 
     // Verify your region matches client.js (e.g., ap-hyderabad-1)

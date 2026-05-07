@@ -15,5 +15,6 @@ router.use("/enquiry", require("./enquiry"));
 router.use("/notifications", require("./notifications"));
 router.use("/supervisors", require("./supervisors"));
 router.use("/activity", require("./activity"));
+router.use("/app-updates", require("./app-updates"));
 
 module.exports = router;

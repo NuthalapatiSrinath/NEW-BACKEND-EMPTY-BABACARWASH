@@ -94,6 +94,22 @@ const schema = new mongoose.Schema(
       uploadedAt: { type: Date },
     },
 
+    // --- 🟡 STAFF APP UPDATE TRACKING ---
+    appUpdate: {
+      installedVersion: { type: String },
+      installedBuildNumber: { type: String },
+      installedAt: { type: Date },
+      downloadedUpdateId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "staff-app-updates",
+      },
+      downloadedVersion: { type: String },
+      downloadedBuildNumber: { type: String },
+      downloadedAt: { type: Date },
+      platform: { type: String },
+      lastCheckAt: { type: Date },
+    },
+
     // --- 🔴 SYSTEM FIELDS ---
     isDeleted: { type: Boolean, default: false },
 

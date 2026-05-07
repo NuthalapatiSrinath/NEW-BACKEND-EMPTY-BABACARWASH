@@ -22,6 +22,7 @@ router.use("/sites", require("./sites"));
 router.use("/configurations", require("./configurations"));
 router.use("/admin/staff", require("./staff"));
 router.use("/admin-staff", require("./admin-staff"));
+router.use("/staff-app-updates", require("./staff-app-updates"));
 router.use("/admin-messages", require("./admin-messages"));
 router.use("/customer-notifications", require("./customer-notifications"));
 router.use("/access-requests", require("./access-requests"));

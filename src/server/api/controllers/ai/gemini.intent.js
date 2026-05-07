@@ -95,12 +95,12 @@ const extractReplyText = (payload = {}) => {
     .trim();
 };
 
-const isGeminiConfigured = () => Boolean(String(process.env.GEMINI_API_KEY || "").trim());
+const isGeminiConfigured = () =>
+  Boolean(String(process.env.GEMINI_API_KEY || "").trim());
 
 const toModelAndUrl = () => {
   const model = String(process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
-  const fallbackUrl =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const fallbackUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const url = String(process.env.GEMINI_URL || "").trim() || fallbackUrl;
 
   return { model, url };
@@ -129,7 +129,11 @@ const toSystemInstruction = (domainCatalog = []) => {
     .join("\n");
 };
 
-const normalizeGeminiIntent = (parsed = {}, prompt = "", allowedDomains = []) => {
+const normalizeGeminiIntent = (
+  parsed = {},
+  prompt = "",
+  allowedDomains = [],
+) => {
   const allowedDomainSet = new Set(
     (Array.isArray(allowedDomains) ? allowedDomains : [])
       .map((item) => normalizeDomain(item))
@@ -168,7 +172,70 @@ const normalizeGeminiIntent = (parsed = {}, prompt = "", allowedDomains = []) =>
   };
 };
 
-const analyzePromptWithGemini = async ({ prompt = "", domainCatalog = [] } = {}) => {
+const toChatSystemInstruction = () =>
+  [
+    "You are BCW Admin AI assistant.",
+    "Reply in 1-2 short sentences.",
+    "If the user asks general questions or greetings, respond politely and guide them to search data.",
+    "Do not claim to access data without a search query.",
+    "Suggest examples: customer name/mobile, vehicle no, receipt no, payments this month.",
+  ].join("\n");
+
+const generateGeminiReply = async ({ prompt = "" } = {}) => {
+  const trimmedPrompt = String(prompt || "").trim();
+  if (!trimmedPrompt || !isGeminiConfigured()) {
+    return "";
+  }
+
+  const { url } = toModelAndUrl();
+  const apiKey = String(process.env.GEMINI_API_KEY || "").trim();
+  const timeoutMs = Number(process.env.GEMINI_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
+
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: toChatSystemInstruction() }],
+        },
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: trimmedPrompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.4,
+          maxOutputTokens: 120,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return "";
+    }
+
+    const payload = await response.json();
+    return extractReplyText(payload);
+  } catch (_) {
+    return "";
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+};
+
+const analyzePromptWithGemini = async ({
+  prompt = "",
+  domainCatalog = [],
+} = {}) => {
   const trimmedPrompt = String(prompt || "").trim();
   if (!trimmedPrompt || !isGeminiConfigured()) {
     return null;
@@ -217,7 +284,11 @@ const analyzePromptWithGemini = async ({ prompt = "", domainCatalog = [] } = {})
       return null;
     }
 
-    return normalizeGeminiIntent(parsed, trimmedPrompt, domainCatalog.map((item) => item.key));
+    return normalizeGeminiIntent(
+      parsed,
+      trimmedPrompt,
+      domainCatalog.map((item) => item.key),
+    );
   } catch (_) {
     return null;
   } finally {
@@ -228,4 +299,5 @@ const analyzePromptWithGemini = async ({ prompt = "", domainCatalog = [] } = {})
 module.exports = {
   analyzePromptWithGemini,
   isGeminiConfigured,
+  generateGeminiReply,
 };
