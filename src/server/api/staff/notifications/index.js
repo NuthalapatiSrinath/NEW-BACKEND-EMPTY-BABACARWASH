@@ -14,5 +14,20 @@ router.put(
   AuthHelper.authenticate,
   controller.markAllAsRead,
 );
+router.post(
+  "/device-token",
+  AuthHelper.authenticate,
+  controller.registerDeviceToken,
+);
+router.delete(
+  "/device-token",
+  AuthHelper.authenticate,
+  controller.removeDeviceToken,
+);
+router.get(
+  "/device-token",
+  AuthHelper.authenticate,
+  controller.listMyDeviceTokens,
+);
 
 module.exports = router;

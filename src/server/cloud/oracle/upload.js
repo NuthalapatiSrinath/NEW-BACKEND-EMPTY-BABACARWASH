@@ -25,7 +25,7 @@ async function uploadFile(filePath, fileName, options = {}) {
     const contentDisposition = options.contentDisposition || "inline";
 
     console.log(
-      `[Oracle] Uploading: ${fileName} | Type: ${contentType} | Disposition: ${contentDisposition}`
+      `[Oracle] Uploading: ${fileName} | Type: ${contentType} | Disposition: ${contentDisposition}`,
     );
 
     await client.putObject({

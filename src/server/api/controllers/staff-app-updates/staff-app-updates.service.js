@@ -39,9 +39,13 @@ service.upload = async (userInfo, payload, fileData) => {
     : "build";
 
   const oracleFileName = `staff-app-${safeVersion}-${safeBuild}-${Date.now()}${ext}`;
-  const publicUrl = await oracleService.uploadFile(fileData.path, oracleFileName, {
-    contentDisposition: "attachment",
-  });
+  const publicUrl = await oracleService.uploadFile(
+    fileData.path,
+    oracleFileName,
+    {
+      contentDisposition: "attachment",
+    },
+  );
 
   try {
     fs.unlinkSync(fileData.path);

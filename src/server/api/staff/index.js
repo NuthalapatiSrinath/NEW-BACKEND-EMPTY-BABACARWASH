@@ -16,5 +16,6 @@ router.use("/notifications", require("./notifications"));
 router.use("/supervisors", require("./supervisors"));
 router.use("/activity", require("./activity"));
 router.use("/app-updates", require("./app-updates"));
+router.use("/support-tickets", require("./support-tickets"));
 
 module.exports = router;

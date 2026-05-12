@@ -25,6 +25,8 @@ router.use("/admin-staff", require("./admin-staff"));
 router.use("/staff-app-updates", require("./staff-app-updates"));
 router.use("/admin-messages", require("./admin-messages"));
 router.use("/customer-notifications", require("./customer-notifications"));
+router.use("/staff-notifications", require("./staff-notifications"));
+router.use("/support-tickets", require("./support-tickets"));
 router.use("/access-requests", require("./access-requests"));
 
 // ✅ FIXED: Added require()

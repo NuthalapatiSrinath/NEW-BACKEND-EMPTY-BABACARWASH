@@ -21,7 +21,7 @@ const schema = new mongoose.Schema(
     versionKey: false,
     strict: false,
     timestamps: true,
-  }
+  },
 );
 
 module.exports = mongoose.model("staff-app-updates", schema);

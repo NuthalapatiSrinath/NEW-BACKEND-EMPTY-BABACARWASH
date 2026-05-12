@@ -15,11 +15,16 @@ const hasSmtpConfig = () => {
 const createTransporter = () => {
   if (!hasSmtpConfig()) return null;
 
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const secureEnv = String(process.env.SMTP_SECURE || "")
+    .trim()
+    .toLowerCase();
+  const secure = secureEnv ? secureEnv === "true" : smtpPort === 465;
+
   return nodemailer.createTransport({
     host: config.smtp.host,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: false,
-    tls: false,
+    port: smtpPort,
+    secure,
     connectionTimeout: 5000,
     greetingTimeout: 5000,
     socketTimeout: 10000,

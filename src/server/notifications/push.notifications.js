@@ -84,6 +84,7 @@ pushNotifications.sendToTokens = async ({
   body,
   imageUrl,
   data = {},
+  channelId,
 }) => {
   const uniqueTokens = Array.from(new Set(tokens.filter(Boolean)));
   if (uniqueTokens.length === 0) {
@@ -93,6 +94,11 @@ pushNotifications.sendToTokens = async ({
   getFirebaseApp();
 
   const normalizedImageUrl = String(imageUrl || "").trim();
+  const normalizedChannelId = String(
+    channelId || data?.channelId || "bcw_customer_high_importance",
+  ).trim();
+  const resolvedChannelId =
+    normalizedChannelId || "bcw_customer_high_importance";
   const response = await admin.messaging().sendEachForMulticast({
     tokens: uniqueTokens,
     notification: {
@@ -107,7 +113,7 @@ pushNotifications.sendToTokens = async ({
     android: {
       priority: "high",
       notification: {
-        channelId: "bcw_customer_high_importance",
+        channelId: resolvedChannelId,
         ...(normalizedImageUrl ? { imageUrl: normalizedImageUrl } : null),
       },
     },
